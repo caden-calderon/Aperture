@@ -47,7 +47,9 @@ use crate::events::types::{ApertureEvent, channels};
 2. **No request capture** — Proxy forwards but doesn't extract context for engine
 3. **No UI updates** — No stable event bridge to push state changes to frontend stores
 4. **No provider detection** — Need to auto-detect Anthropic vs OpenAI from requests
-5. **No pause/hold** — Can't intercept requests for inspection before forwarding
+5. **No Responses API support** — Codex/OpenAI flows may use `/v1/responses`, not only chat completions
+6. **No seamless in-app tool launch** — Launching Claude/Codex from terminal should auto-connect to Aperture without manual env setup each time
+7. **No pause/hold** — Can't intercept requests for inspection before forwarding
 
 ---
 
@@ -60,13 +62,14 @@ Extend `src-tauri/src/proxy/` to:
 - Emit structured events for engine consumption
 - Support pause/hold mode for request inspection
 - Handle all Anthropic API endpoints (`/v1/messages`, `/v1/complete`)
-- Handle OpenAI-compatible endpoints (`/v1/chat/completions`)
+- Handle OpenAI-compatible endpoints (`/v1/chat/completions`, `/v1/responses`)
 
 ### 2. Request/Response Parsing
 
 Create `src-tauri/src/proxy/parser.rs`:
 - Parse Anthropic message format into blocks
-- Parse OpenAI message format into blocks
+- Parse OpenAI Chat Completions format into blocks
+- Parse OpenAI Responses format into blocks
 - Normalize both into universal Block format (use `engine::block::Block`)
 - Handle tool_use and tool_result blocks
 - Extract token counts from responses
@@ -94,10 +97,33 @@ Update Svelte stores:
 Detect provider from request characteristics:
 - `x-api-key` header → Anthropic
 - `Authorization: Bearer` → OpenAI
-- Path patterns (`/v1/messages` vs `/v1/chat/completions`)
+- Path patterns (`/v1/messages` vs `/v1/chat/completions` vs `/v1/responses`)
 - Store detected provider per session
 
-### 6. Hot Patch Mode
+Detection requirement:
+- Do not rely on provider-specific key prefixes (`sk-*`) to detect OpenAI traffic.
+- Treat valid bearer auth + OpenAI endpoint patterns as sufficient for routing.
+
+### 6. Seamless In-App Provider Launch
+
+When launched from Aperture's embedded terminal, provider CLIs should auto-connect:
+- `claude` / `claude-code` launched with `ANTHROPIC_BASE_URL=http://localhost:5400`
+- `codex` launched with `OPENAI_BASE_URL` and `OPENAI_API_BASE` pointing to proxy
+- Auto-tag session metadata with launch source (`embedded-terminal`) and provider
+- Show connection indicator in UI once first request is observed
+
+Goal:
+- Open app → open terminal → run `claude` or `codex` → context appears with no extra manual wiring
+
+### 6a. Provider Selector Quick Launch
+
+Add a one-click launch flow in UI:
+- Provider selector (Claude Code | Codex) in terminal controls/header
+- "Launch" action starts selected CLI with proxy env vars injected
+- Show launch status (`starting`, `connected`, `error`) and selected provider
+- Keep manual terminal usage available; selector is additive convenience
+
+### 7. Hot Patch Mode
 
 Allow edits to take effect on the next request:
 - Store pending block modifications in proxy state
@@ -120,6 +146,8 @@ Allow edits to take effect on the next request:
 | `src-tauri/src/events/mod.rs` | Modify | Extend with dispatcher (exists from Phase 0.5) |
 | `src-tauri/src/events/types.rs` | Modify | Extend event variants as needed (exists from Phase 0.5) |
 | `src-tauri/src/events/dispatcher.rs` | **NEW** | Event broadcasting to frontend |
+| `src-tauri/src/terminal/mod.rs` | Modify | Add provider-aware launch helpers (Claude/Codex env injection) |
+| `src/lib/components/layout/TerminalPanel.svelte` | Modify | Provider selector + quick launch controls |
 | `src/lib/stores/context.svelte.ts` | Modify | Tauri event subscription |
 | `src/lib/stores/connection.svelte.ts` | **NEW** | Connection state management |
 
@@ -131,9 +159,10 @@ Allow edits to take effect on the next request:
 
 1. Define `ParsedRequest` and `ParsedResponse` types
 2. Implement Anthropic message parser
-3. Implement OpenAI message parser
-4. Implement normalization to universal Block format
-5. Unit tests for both parsers
+3. Implement OpenAI Chat Completions parser
+4. Implement OpenAI Responses parser
+5. Implement normalization to universal Block format
+6. Unit tests for all parsers
 
 ### Step 2: Capture System (~10k context)
 
@@ -159,6 +188,15 @@ Allow edits to take effect on the next request:
 4. Handle reconnection logic
 5. Test with real API call through proxy
 
+### Step 5: Embedded Terminal Launch Integration (~8k context)
+
+1. Add terminal launch helpers for Claude and Codex
+2. Inject proxy base-url env vars for each provider CLI
+3. Add provider selector + quick launch controls in UI
+4. Emit launch metadata event for session labeling
+5. Verify first request auto-associates with launched provider
+6. Unit/integration tests for launch env injection and selector behavior
+
 ---
 
 ## Test Coverage
@@ -167,10 +205,12 @@ Allow edits to take effect on the next request:
 
 | File | Tests | Focus |
 |------|-------|-------|
-| `src-tauri/src/proxy/parser.rs` | 10 | Message parsing edge cases |
+| `src-tauri/src/proxy/parser.rs` | 12 | Anthropic + OpenAI chat/responses parsing |
 | `src-tauri/src/proxy/capture.rs` | 8 | Request/response capture |
 | `src-tauri/src/events/types.rs` | 4 | Event serialization |
 | `src-tauri/src/events/dispatcher.rs` | 3 | Event dispatch basics |
+| `src-tauri/src/terminal/mod.rs` | 3 | Provider launch env injection |
+| `src/lib/components/layout/TerminalPanel.svelte` | 2 | Provider selector state + launch actions |
 
 ### Integration Tests (~8 tests)
 
@@ -178,17 +218,21 @@ Allow edits to take effect on the next request:
 |------|-------|-------|
 | `tests/integration/test_proxy_flow.rs` | 5 | Full request → parse → event flow |
 | `tests/integration/test_event_bridge.rs` | 3 | Tauri event bridge + store updates |
+| `tests/integration/test_provider_launch.rs` | 2 | Embedded terminal launch wiring |
 
-### Manual Tests (6 tests)
+### Manual Tests (8 tests)
 
 | Test | Description |
 |------|-------------|
 | `test_anthropic_passthrough` | Real Claude API call through proxy |
 | `test_openai_passthrough` | Real OpenAI API call through proxy |
+| `test_openai_responses_passthrough` | Real OpenAI Responses API call through proxy |
 | `test_sse_streaming` | Verify streaming responses display in UI |
 | `test_ui_live_update` | Verify UI updates when request captured |
 | `test_reconnection` | Restart proxy/event listeners, verify state recovery |
 | `test_pause_mode` | Enable pause, verify request held until released |
+| `test_embedded_terminal_launch` | Launch `claude`/`codex` in terminal panel, verify auto-connect and provider tagging |
+| `test_provider_selector_launch` | Select provider, click launch, verify CLI starts with correct env wiring |
 
 ---
 
@@ -196,10 +240,13 @@ Allow edits to take effect on the next request:
 
 - [ ] Proxy intercepts and forwards Anthropic API calls
 - [ ] Proxy intercepts and forwards OpenAI-compatible API calls
+- [ ] Proxy intercepts and forwards OpenAI Responses API calls (`/v1/responses`)
 - [ ] Message arrays parsed into universal Block format
 - [ ] UI receives real-time updates via event bridge
 - [ ] Streaming responses show progress indicator
 - [ ] Connection status visible in UI
+- [ ] In-app terminal launch of `claude`/`codex` auto-connects to proxy
+- [ ] Provider selector quick-launch works for Claude Code and Codex
 - [ ] Pause mode holds request until manual release
 - [ ] Provider auto-detected from request headers
 - [ ] `make check` passes
