@@ -5,8 +5,11 @@
 //! requests and responses for visualization while streaming SSE
 //! responses back to clients.
 
+pub mod capture;
 pub mod error;
-mod handler;
+pub mod handler;
+pub mod hot_patch;
+pub mod parser;
 
 use axum::{routing::any, Router};
 use reqwest::Client;
@@ -15,7 +18,10 @@ use std::time::Duration;
 use tokio::net::TcpListener;
 use tracing::info;
 
+use self::capture::CaptureStore;
 use self::error::ProxyError;
+use self::hot_patch::HotPatchQueue;
+use crate::events::dispatcher::DynDispatcher;
 
 /// Default port for the proxy server.
 pub const DEFAULT_PORT: u16 = 5400;
@@ -46,6 +52,13 @@ impl Default for UpstreamConfig {
 pub struct ProxyState {
     pub(crate) client: Client,
     pub(crate) config: UpstreamConfig,
+    /// Captured request/response exchanges.
+    pub capture: CaptureStore,
+    /// Event dispatcher for sending events to the Tauri frontend.
+    /// `None` when running without a Tauri window (e.g., tests).
+    pub(crate) dispatcher: Option<DynDispatcher>,
+    /// Pending hot patches to apply on the next outbound request.
+    pub hot_patches: Arc<HotPatchQueue>,
 }
 
 impl ProxyState {
@@ -53,25 +66,51 @@ impl ProxyState {
         builder.build().map_err(ProxyError::ClientBuildFailed)
     }
 
-    /// Create new proxy state with default configuration.
+    /// Create new proxy state with default configuration (no event dispatch).
     pub fn new() -> Result<Self, ProxyError> {
         let client = Self::build_client(Client::builder().timeout(Duration::from_secs(120)))?;
         Ok(Self {
             client,
             config: UpstreamConfig::default(),
+            capture: CaptureStore::default(),
+            dispatcher: None,
+            hot_patches: Arc::new(HotPatchQueue::new()),
         })
     }
 
     /// Create proxy state with custom upstream configuration.
     pub fn with_config(config: UpstreamConfig) -> Result<Self, ProxyError> {
         let client = Self::build_client(Client::builder().timeout(Duration::from_secs(120)))?;
-        Ok(Self { client, config })
+        Ok(Self {
+            client,
+            config,
+            capture: CaptureStore::default(),
+            dispatcher: None,
+            hot_patches: Arc::new(HotPatchQueue::new()),
+        })
+    }
+
+    /// Attach an event dispatcher.
+    pub fn with_dispatcher(mut self, dispatcher: DynDispatcher) -> Self {
+        self.dispatcher = Some(dispatcher);
+        self
     }
 }
 
 /// Start the proxy server.
-pub async fn start_proxy(port: u16) -> Result<(), ProxyError> {
-    let state = Arc::new(ProxyState::new()?);
+pub async fn start_proxy(
+    port: u16,
+    dispatcher: Option<DynDispatcher>,
+    hot_patches: Option<Arc<HotPatchQueue>>,
+) -> Result<(), ProxyError> {
+    let mut state = ProxyState::new()?;
+    if let Some(d) = dispatcher {
+        state = state.with_dispatcher(d);
+    }
+    if let Some(hp) = hot_patches {
+        state.hot_patches = hp;
+    }
+    let state = Arc::new(state);
 
     let app = Router::new()
         .route("/{*path}", any(handler::proxy_handler))
@@ -120,5 +159,13 @@ mod tests {
         let result = ProxyState::build_client(builder);
 
         assert!(matches!(result, Err(ProxyError::ClientBuildFailed(_))));
+    }
+
+    #[test]
+    fn test_proxy_state_has_capture_store() {
+        let state = ProxyState::new().unwrap();
+        assert!(state.dispatcher.is_none());
+        // CaptureStore is always present
+        assert!(state.capture.get_exchange("nonexistent").is_none());
     }
 }

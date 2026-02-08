@@ -55,6 +55,13 @@ const BUILT_IN_TYPES: BlockType[] = [
     color: 'var(--role-tool)',
     isBuiltIn: true,
   },
+  {
+    id: 'thinking',
+    label: 'Thinking',
+    shortLabel: 'THINK',
+    color: 'var(--role-thinking)',
+    isBuiltIn: true,
+  },
 ];
 
 // ============================================================================

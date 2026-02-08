@@ -278,6 +278,7 @@
     assistant: "var(--role-assistant)",
     tool_use: "var(--role-tool)",
     tool_result: "var(--role-tool)",
+    thinking: "var(--role-thinking)",
   };
 
   function handleBackdropClick(e: MouseEvent) {

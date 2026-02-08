@@ -7,6 +7,8 @@
 // ============================================================================
 
 export type TerminalPosition = 'bottom' | 'right';
+export type TerminalProvider = 'anthropic' | 'openai' | 'openai_proxy' | 'none';
+export type LaunchStatus = 'idle' | 'launching' | 'running' | 'error';
 
 // ============================================================================
 // State
@@ -20,6 +22,8 @@ let position = $state<TerminalPosition>('bottom');
 let isExited = $state(false);
 let preCollapseHeight = $state(300);
 let preCollapseWidth = $state(400);
+let selectedProvider = $state<TerminalProvider>('none');
+let launchStatus = $state<LaunchStatus>('idle');
 
 // ============================================================================
 // Persistence Keys
@@ -124,6 +128,14 @@ function setExited(value: boolean): void {
   isExited = value;
 }
 
+function setSelectedProvider(provider: TerminalProvider): void {
+  selectedProvider = provider;
+}
+
+function setLaunchStatus(s: LaunchStatus): void {
+  launchStatus = s;
+}
+
 // ============================================================================
 // Persistence
 // ============================================================================
@@ -183,6 +195,8 @@ export const terminalStore = {
     return size <= COLLAPSED_SIZE;
   },
   get collapsedSize() { return COLLAPSED_SIZE; },
+  get selectedProvider() { return selectedProvider; },
+  get launchStatus() { return launchStatus; },
 
   init,
   show,
@@ -194,6 +208,8 @@ export const terminalStore = {
   togglePosition,
   setSessionId,
   setExited,
+  setSelectedProvider,
+  setLaunchStatus,
   collapseTerminal,
   expandFromCollapsed,
   toggleCollapsed,

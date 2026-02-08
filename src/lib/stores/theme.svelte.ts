@@ -27,6 +27,7 @@ export interface ThemeColors {
   roleUser: string;
   roleAssistant: string;
   roleTool: string;
+  roleThinking: string;
   // Semantic colors
   semanticDanger: string;
   semanticWarning: string;
@@ -67,6 +68,7 @@ export const PRESETS: ThemePreset[] = [
       roleUser: '#7090b0',
       roleAssistant: '#80a880',
       roleTool: '#b0a080',
+      roleThinking: '#9882c4',
       semanticDanger: '#c86860',
       semanticWarning: '#c8a060',
       semanticSuccess: '#70a870',
@@ -92,6 +94,7 @@ export const PRESETS: ThemePreset[] = [
       roleUser: '#7aa2f7',
       roleAssistant: '#9ece6a',
       roleTool: '#e0af68',
+      roleThinking: '#a78bfa',
       semanticDanger: '#f7768e',
       semanticWarning: '#e0af68',
       semanticSuccess: '#9ece6a',
@@ -117,6 +120,7 @@ export const PRESETS: ThemePreset[] = [
       roleUser: '#83a598',
       roleAssistant: '#b8bb26',
       roleTool: '#fabd2f',
+      roleThinking: '#b48ead',
       semanticDanger: '#fb4934',
       semanticWarning: '#fabd2f',
       semanticSuccess: '#b8bb26',
@@ -142,6 +146,7 @@ export const PRESETS: ThemePreset[] = [
       roleUser: '#89b4fa',
       roleAssistant: '#a6e3a1',
       roleTool: '#f9e2af',
+      roleThinking: '#b4a0e5',
       semanticDanger: '#f38ba8',
       semanticWarning: '#fab387',
       semanticSuccess: '#a6e3a1',
@@ -167,6 +172,7 @@ export const PRESETS: ThemePreset[] = [
       roleUser: '#81a1c1',
       roleAssistant: '#a3be8c',
       roleTool: '#ebcb8b',
+      roleThinking: '#9b8ec4',
       semanticDanger: '#bf616a',
       semanticWarning: '#ebcb8b',
       semanticSuccess: '#a3be8c',
@@ -192,6 +198,7 @@ export const PRESETS: ThemePreset[] = [
       roleUser: '#8be9fd',
       roleAssistant: '#50fa7b',
       roleTool: '#ffb86c',
+      roleThinking: '#c4a7fa',
       semanticDanger: '#ff5555',
       semanticWarning: '#ffb86c',
       semanticSuccess: '#50fa7b',
@@ -217,6 +224,7 @@ export const PRESETS: ThemePreset[] = [
       roleUser: '#61afef',
       roleAssistant: '#98c379',
       roleTool: '#e5c07b',
+      roleThinking: '#b07ed8',
       semanticDanger: '#e06c75',
       semanticWarning: '#e5c07b',
       semanticSuccess: '#98c379',
@@ -242,6 +250,7 @@ export const PRESETS: ThemePreset[] = [
       roleUser: '#268bd2',
       roleAssistant: '#859900',
       roleTool: '#b58900',
+      roleThinking: '#8b7ec8',
       semanticDanger: '#dc322f',
       semanticWarning: '#cb4b16',
       semanticSuccess: '#859900',
@@ -268,6 +277,7 @@ export const PRESETS: ThemePreset[] = [
       roleUser: '#3a5878',
       roleAssistant: '#3a6848',
       roleTool: '#705838',
+      roleThinking: '#6a4b8a',
       semanticDanger: '#a04848',
       semanticWarning: '#907030',
       semanticSuccess: '#3a6838',
@@ -293,6 +303,7 @@ export const PRESETS: ThemePreset[] = [
       roleUser: '#076678',
       roleAssistant: '#79740e',
       roleTool: '#b57614',
+      roleThinking: '#7c4d8a',
       semanticDanger: '#9d0006',
       semanticWarning: '#b57614',
       semanticSuccess: '#79740e',
@@ -318,6 +329,7 @@ export const PRESETS: ThemePreset[] = [
       roleUser: '#2e7de9',
       roleAssistant: '#587539',
       roleTool: '#8a5b0e',
+      roleThinking: '#7847a0',
       semanticDanger: '#c64343',
       semanticWarning: '#8a5b0e',
       semanticSuccess: '#587539',
@@ -343,6 +355,7 @@ export const PRESETS: ThemePreset[] = [
       roleUser: '#406080',
       roleAssistant: '#486848',
       roleTool: '#806030',
+      roleThinking: '#6e4a82',
       semanticDanger: '#904040',
       semanticWarning: '#906820',
       semanticSuccess: '#406838',
@@ -368,6 +381,7 @@ export const PRESETS: ThemePreset[] = [
       roleUser: '#268bd2',
       roleAssistant: '#859900',
       roleTool: '#b58900',
+      roleThinking: '#7c5caa',
       semanticDanger: '#dc322f',
       semanticWarning: '#cb4b16',
       semanticSuccess: '#859900',
@@ -462,6 +476,7 @@ function applyColors(colors: ThemeColors, isDark: boolean): void {
   root.style.setProperty('--role-user', colors.roleUser);
   root.style.setProperty('--role-assistant', colors.roleAssistant);
   root.style.setProperty('--role-tool', colors.roleTool);
+  root.style.setProperty('--role-thinking', colors.roleThinking);
 
   // Semantic colors
   root.style.setProperty('--semantic-danger', colors.semanticDanger);

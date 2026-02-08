@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { TokenBudgetBar, Zone, Modal, Toast, CommandPalette, ThemeToggle, DensityControl, TitleBar, ThemeCustomizer, BlockTypeManager, ZoneManager, SearchBar, TerminalPanel, ContextMenu, ZoneMinimap, ContextDiff } from "$lib/components";
-  import { contextStore, selectionStore, uiStore, themeStore, blockTypesStore, zonesStore, searchStore, terminalStore, editHistoryStore } from "$lib/stores";
+  import { contextStore, selectionStore, uiStore, themeStore, blockTypesStore, zonesStore, searchStore, terminalStore, editHistoryStore, connectionStore } from "$lib/stores";
   import { createResizable, createBlockHandlers, createModalHandlers, createKeyboardHandlers, createCommandHandlers } from "$lib/composables";
   import type { Zone as ZoneType } from "$lib/types";
 
@@ -57,6 +57,15 @@
     editHistoryStore.init();
     contextStore.init();
 
+    // Connect to proxy and subscribe to live events
+    connectionStore.onBlocksCaptured((requestBlocks, responseBlocks) => {
+      contextStore.setLiveBlocks(requestBlocks, responseBlocks);
+    });
+    connectionStore.onSessionReset(() => {
+      contextStore.clearBlocks();
+    });
+    connectionStore.connect();
+
     // Flush debounced localStorage writes + cleanup terminal on window close
     const handleBeforeUnload = () => {
       contextStore.flushPendingWrites();
@@ -74,6 +83,7 @@
 
     return () => {
       window.removeEventListener('beforeunload', handleBeforeUnload);
+      connectionStore.disconnect();
     };
   });
 

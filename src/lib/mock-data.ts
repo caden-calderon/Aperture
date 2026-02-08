@@ -603,42 +603,10 @@ export function generateDemoSession(): Session {
   };
 }
 
-export function generateDemoSnapshots(currentBlocks: Block[]): Snapshot[] {
-  // Build snapshot from a subset of current blocks with some modifications
-  // "Before refactor" — early subset, some blocks in different zones
-  const earlyBlocks = currentBlocks.slice(0, Math.ceil(currentBlocks.length * 0.6)).map((b) => ({
-    ...b,
-    // Simulate some blocks being in different zones
-    zone: b.zone === "recency" ? "middle" as Zone : b.zone,
-  }));
-  const earlyTokens = earlyBlocks.reduce((sum, b) => sum + b.tokens, 0);
-
-  // "Working state" — most blocks, some with different compression
-  const workingBlocks = currentBlocks.slice(0, Math.ceil(currentBlocks.length * 0.85)).map((b, i) => ({
-    ...b,
-    // Simulate a few blocks being in original compression
-    compressionLevel: (i % 5 === 0 ? "original" : b.compressionLevel) as CompressionLevel,
-  }));
-  const workingTokens = workingBlocks.reduce((sum, b) => sum + b.tokens, 0);
-
-  return [
-    {
-      id: "snap-1",
-      name: "Before refactor",
-      timestamp: new Date(Date.now() - 1800000),
-      blocks: earlyBlocks,
-      totalTokens: earlyTokens,
-      type: "hard",
-    },
-    {
-      id: "snap-2",
-      name: "Working state",
-      timestamp: new Date(Date.now() - 600000),
-      blocks: workingBlocks,
-      totalTokens: workingTokens,
-      type: "soft",
-    },
-  ];
+export function generateDemoSnapshots(_currentBlocks: Block[]): Snapshot[] {
+  // No demo snapshots — working state is the default.
+  // Users can save snapshots manually via the sidebar.
+  return [];
 }
 
 export function calculateTokenBudget(blocks: Block[]): TokenBudget {
@@ -652,6 +620,7 @@ export function calculateTokenBudget(blocks: Block[]): TokenBudget {
       assistant: 0,
       tool_use: 0,
       tool_result: 0,
+      thinking: 0,
     },
   };
 

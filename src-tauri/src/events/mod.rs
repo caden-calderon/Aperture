@@ -4,4 +4,5 @@
 //! Events are emitted via Tauri's event system and consumed by the
 //! Svelte frontend for real-time updates.
 
+pub mod dispatcher;
 pub mod types;

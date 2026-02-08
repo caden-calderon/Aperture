@@ -6,6 +6,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { terminalStore } from "$lib/stores/terminal.svelte";
+  import { connectionStore } from "$lib/stores/connection.svelte";
   import { themeStore } from "$lib/stores/theme.svelte";
 
   let containerEl = $state<HTMLDivElement | null>(null);
@@ -15,10 +16,49 @@
   let resizeTimeout: ReturnType<typeof setTimeout> | null = null;
   let unlistenOutput: UnlistenFn | null = null;
   let unlistenExit: UnlistenFn | null = null;
+  let codexBridgeRunning = $state(false);
 
-  async function spawnShell() {
+  async function startCodexSubscriptionBridge(): Promise<void> {
     try {
-      const id = await invoke<string>('spawn_shell');
+      await invoke<boolean>('start_codex_subscription_bridge');
+      codexBridgeRunning = true;
+    } catch {
+      // Ignore outside Tauri / unsupported runtime
+    }
+  }
+
+  async function stopCodexSubscriptionBridge(): Promise<void> {
+    try {
+      await invoke<boolean>('stop_codex_subscription_bridge');
+      codexBridgeRunning = false;
+    } catch {
+      // Ignore outside Tauri / unsupported runtime
+    }
+  }
+
+  function maybeStartCodexBridgeFromOutput(text: string): void {
+    if (codexBridgeRunning) return;
+
+    // Covers startup banner and resume hint text in Codex TUI output.
+    if (text.includes('OpenAI Codex') || text.includes('codex resume ')) {
+      void startCodexSubscriptionBridge();
+    }
+  }
+
+  /** Spawn a shell, optionally configured for a specific provider. */
+  async function spawnShell(provider?: string, command?: string): Promise<boolean> {
+    try {
+      let id: string;
+      if (provider && provider !== 'none') {
+        // Provider-aware spawn: injects proxy env vars
+        id = await invoke<string>('spawn_provider_shell', {
+          provider,
+          command: command ?? null,
+        });
+      } else {
+        id = await invoke<string>('spawn_shell');
+      }
+
       terminalStore.setSessionId(id);
       terminalStore.setExited(false);
 
@@ -26,19 +66,53 @@
         const [sid, data] = event.payload;
         if (sid === terminalStore.sessionId && terminal) {
           terminal.write(data);
+          maybeStartCodexBridgeFromOutput(data);
         }
       });
 
       unlistenExit = await listen<string>('terminal:exit', (event) => {
         if (event.payload === terminalStore.sessionId) {
           terminalStore.setExited(true);
+          terminalStore.setLaunchStatus('idle');
+          connectionStore.clearSession();
           terminal?.write('\r\n\x1b[90m[Process exited — press Enter to restart]\x1b[0m\r\n');
         }
       });
+      return true;
     } catch (e) {
       console.error('Failed to spawn shell:', e);
+      terminalStore.setLaunchStatus('error');
       terminal?.write(`\r\n\x1b[31mFailed to spawn shell: ${e}\x1b[0m\r\n`);
+      return false;
     }
+  }
+
+  /**
+   * Launch a provider CLI:
+   * - anthropic: Claude via proxy
+   * - openai: Codex direct (ChatGPT subscription mode)
+   * - openai_proxy: Codex via Aperture proxy (API key/scopes required)
+   */
+  export async function launchProvider(provider: 'anthropic' | 'openai' | 'openai_proxy') {
+    // Provider switch = new client session; clear old live context first.
+    connectionStore.clearSession();
+
+    // Kill existing session first
+    cleanup();
+    terminal?.clear();
+
+    terminalStore.setSelectedProvider(provider);
+    terminalStore.setLaunchStatus('launching');
+
+    if (provider === 'openai') {
+      await startCodexSubscriptionBridge();
+    } else {
+      await stopCodexSubscriptionBridge();
+    }
+
+    const command = provider === 'anthropic' ? 'claude' : 'codex';
+    const ok = await spawnShell(provider, command);
+    terminalStore.setLaunchStatus(ok ? 'running' : 'error');
   }
 
   function doFit() {
@@ -121,6 +195,7 @@
 
   onDestroy(() => {
     cleanup();
+    void stopCodexSubscriptionBridge();
     if (resizeTimeout) clearTimeout(resizeTimeout);
     resizeObserver?.disconnect();
     terminal?.dispose();

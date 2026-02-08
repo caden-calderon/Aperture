@@ -7,7 +7,7 @@
 // Block Types
 // ============================================================================
 
-export type Role = "system" | "user" | "assistant" | "tool_use" | "tool_result";
+export type Role = "system" | "user" | "assistant" | "tool_use" | "tool_result" | "thinking";
 
 // Built-in zones + custom zones (custom zones are string IDs like "zone-123")
 export type Zone = "primacy" | "middle" | "recency" | (string & {});
@@ -182,7 +182,7 @@ export type BlockFilter = {
 };
 
 export function isRole(value: string): value is Role {
-  return ["system", "user", "assistant", "tool_use", "tool_result"].includes(
+  return ["system", "user", "assistant", "tool_use", "tool_result", "thinking"].includes(
     value
   );
 }

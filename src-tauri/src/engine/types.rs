@@ -11,6 +11,7 @@ pub enum Role {
     Assistant,
     ToolUse,
     ToolResult,
+    Thinking,
 }
 
 /// Built-in context zones.

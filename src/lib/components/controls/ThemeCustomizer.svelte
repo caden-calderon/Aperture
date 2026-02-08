@@ -30,7 +30,7 @@
     },
     {
       label: 'Block Types',
-      keys: ['roleSystem', 'roleUser', 'roleAssistant', 'roleTool'],
+      keys: ['roleSystem', 'roleUser', 'roleAssistant', 'roleTool', 'roleThinking'],
     },
     {
       label: 'Semantic',
@@ -54,6 +54,7 @@
     roleUser: 'User',
     roleAssistant: 'Assistant',
     roleTool: 'Tool',
+    roleThinking: 'Thinking',
     semanticDanger: 'Danger',
     semanticWarning: 'Warning',
     semanticSuccess: 'Success',

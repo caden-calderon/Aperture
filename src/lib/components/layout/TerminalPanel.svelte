@@ -1,8 +1,9 @@
 <script lang="ts">
   import Terminal from "../features/Terminal.svelte";
-  import { terminalStore } from "$lib/stores/terminal.svelte";
+  import { terminalStore, type TerminalProvider } from "$lib/stores/terminal.svelte";
 
   let terminalRef = $state<ReturnType<typeof Terminal> | null>(null);
+  let showProviderMenu = $state(false);
 
   export function focusTerminal() {
     terminalRef?.focus();
@@ -31,6 +32,32 @@
   function handleExpandFromCollapsed() {
     terminalStore.expandFromCollapsed();
   }
+
+  function handleLaunch(provider: 'anthropic' | 'openai' | 'openai_proxy') {
+    showProviderMenu = false;
+    terminalRef?.launchProvider(provider);
+  }
+
+  function toggleProviderMenu() {
+    showProviderMenu = !showProviderMenu;
+  }
+
+  function closeProviderMenu() {
+    showProviderMenu = false;
+  }
+
+  const providerLabel: Record<TerminalProvider, string> = {
+    anthropic: 'Claude',
+    openai: 'Codex Direct',
+    openai_proxy: 'Codex Proxy',
+    none: 'Shell',
+  };
+
+  let statusDot = $derived(
+    terminalStore.launchStatus === 'running' ? 'status-running' :
+    terminalStore.launchStatus === 'launching' ? 'status-launching' :
+    terminalStore.launchStatus === 'error' ? 'status-error' : ''
+  );
 </script>
 
 {#if terminalStore.isVisible}
@@ -58,10 +85,49 @@
     >
       <div class="terminal-header">
         <div class="terminal-title">
-          <span class="terminal-icon">&#x25B8;</span>
-          <span>Terminal</span>
+          {#if statusDot}
+            <span class="terminal-status-dot {statusDot}"></span>
+          {:else}
+            <span class="terminal-icon">&#x25B8;</span>
+          {/if}
+          <span>{providerLabel[terminalStore.selectedProvider]}</span>
         </div>
         <div class="terminal-actions">
+          <!-- Provider quick-launch -->
+          <div class="provider-launcher">
+            <button
+              class="terminal-btn launch-btn"
+              title="Launch provider CLI"
+              onclick={toggleProviderMenu}
+            >
+              <!-- Provider launch icon (play triangle + connection dots) -->
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M5 3l8 5-8 5V3z" fill="currentColor" stroke="none" opacity="0.7" />
+                <circle cx="3" cy="4" r="1.5" fill="currentColor" stroke="none" opacity="0.5" />
+                <circle cx="3" cy="12" r="1.5" fill="currentColor" stroke="none" opacity="0.5" />
+              </svg>
+            </button>
+            {#if showProviderMenu}
+              <!-- svelte-ignore a11y_no_static_element_interactions -->
+              <div class="provider-menu" onmouseleave={closeProviderMenu}>
+                <button class="provider-option" onclick={() => handleLaunch('anthropic')}>
+                  <span class="provider-dot anthropic-dot"></span>
+                  Claude Code
+                </button>
+                <button class="provider-option" onclick={() => handleLaunch('openai')}>
+                  <span class="provider-dot openai-dot"></span>
+                  Codex (ChatGPT Direct)
+                </button>
+                <button class="provider-option" onclick={() => handleLaunch('openai_proxy')}>
+                  <span class="provider-dot openai-dot"></span>
+                  Codex (API via Proxy)
+                </button>
+                <div class="provider-hint">
+                  Direct uses ChatGPT login. Proxy mode needs `api.responses.write`.
+                </div>
+              </div>
+            {/if}
+          </div>
           <button class="terminal-btn" title="Clear" onclick={handleClear}>
             <!-- Eraser icon -->
             <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -223,5 +289,98 @@
     min-height: 0;
     /* Match xterm theme background so cell-grid edge gaps are invisible */
     background: var(--bg-base);
+  }
+
+  /* Status dot in title */
+  .terminal-status-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .status-running {
+    background: var(--semantic-success);
+  }
+
+  .status-launching {
+    background: var(--semantic-warning);
+    animation: pulse 1s ease-in-out infinite;
+  }
+
+  .status-error {
+    background: var(--semantic-danger);
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  /* Provider launcher */
+  .provider-launcher {
+    position: relative;
+  }
+
+  .launch-btn {
+    color: var(--text-muted);
+  }
+
+  .provider-menu {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    z-index: 100;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-default);
+    border-radius: 4px;
+    padding: 2px;
+    min-width: 220px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  }
+
+  .provider-option {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    padding: 5px 8px;
+    background: transparent;
+    border: none;
+    border-radius: 3px;
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    cursor: pointer;
+    text-align: left;
+  }
+
+  .provider-option:hover {
+    background: var(--bg-hover);
+  }
+
+  .provider-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .anthropic-dot {
+    background: #d4a373;
+  }
+
+  .openai-dot {
+    background: #74c7a0;
+  }
+
+  .provider-hint {
+    margin-top: 2px;
+    padding: 4px 8px;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    line-height: 1.3;
+    border-top: 1px solid var(--border-subtle);
   }
 </style>

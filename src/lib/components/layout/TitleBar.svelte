@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { contextStore, zonesStore } from "$lib/stores";
+  import { contextStore, zonesStore, connectionStore } from "$lib/stores";
 
   let showStatus = $state(false);
 
@@ -72,9 +72,9 @@
 
   {#if showStatus}
     <div class="status-dropdown">
-      <span class="status-indicator" class:status-connected={false} title="Proxy disconnected">
+      <span class="status-indicator" class:status-active={connectionStore.isActive} class:status-idle={connectionStore.status === 'connected'} title="Proxy {connectionStore.status}">
         <span class="status-dot"></span>
-        <span class="status-label">Disconnected</span>
+        <span class="status-label">{connectionStore.isActive ? "ACTIVE" : connectionStore.status === "connected" ? "IDLE" : connectionStore.status.toUpperCase()}{connectionStore.isStreaming ? " (streaming)" : ""}</span>
       </span>
       <span class="status-sep"></span>
       <span class="status-stat" title="Total blocks">
@@ -88,6 +88,24 @@
       <span class="status-stat" title="Total tokens">
         <strong>{formatNumber(contextStore.tokenBudget.used)}</strong> / {formatNumber(contextStore.tokenLimit)} tokens
       </span>
+      {#if connectionStore.totalRequestsCaptured > 0}
+        <span class="status-sep"></span>
+        <span class="status-stat" title="Requests captured">
+          <strong>{connectionStore.totalRequestsCaptured}</strong> captured
+        </span>
+      {/if}
+      {#if connectionStore.activeModel}
+        <span class="status-sep"></span>
+        <span class="status-stat" title="Active model">
+          {connectionStore.activeModel}
+        </span>
+      {/if}
+      {#if connectionStore.pendingHotPatches > 0}
+        <span class="status-sep"></span>
+        <span class="status-stat status-hot-patch" title="Pending hot patches — will apply on next request">
+          <strong>{connectionStore.pendingHotPatches}</strong> patch{connectionStore.pendingHotPatches === 1 ? '' : 'es'}
+        </span>
+      {/if}
     </div>
   {/if}
 </div>
@@ -249,9 +267,13 @@
     flex-shrink: 0;
   }
 
-  .status-indicator.status-connected .status-dot {
+  .status-indicator.status-active .status-dot {
     background: var(--semantic-success);
     box-shadow: 0 0 4px color-mix(in srgb, var(--semantic-success) 50%, transparent);
+  }
+
+  .status-indicator.status-idle .status-dot {
+    background: var(--text-muted);
   }
 
   .status-label {
@@ -282,5 +304,13 @@
   .window-btn-close:hover {
     background: #e53935;
     color: white;
+  }
+
+  .status-hot-patch {
+    color: var(--semantic-warning);
+  }
+
+  .status-hot-patch strong {
+    color: var(--semantic-warning);
   }
 </style>

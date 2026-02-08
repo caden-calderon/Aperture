@@ -15,6 +15,7 @@ import {
 } from "../mock-data";
 import { editHistoryStore } from "./editHistory.svelte";
 import { zonesStore } from "./zones.svelte";
+import { invoke } from "@tauri-apps/api/core";
 
 // ============================================================================
 // State
@@ -77,10 +78,10 @@ function loadFromLocalStorage(): boolean {
     if (!stored) return false;
 
     const data = JSON.parse(stored);
-    if (!Array.isArray(data.blocks) || data.blocks.length === 0) return false;
+    const storedBlocks: Block[] = Array.isArray(data.blocks) ? data.blocks : [];
 
     // Restore Date objects (JSON serializes them as strings)
-    blocks = data.blocks.map((b: Block) => ({
+    blocks = storedBlocks.map((b: Block) => ({
       ...b,
       timestamp: new Date(b.timestamp),
     }));
@@ -100,7 +101,7 @@ function loadFromLocalStorage(): boolean {
     activeSnapshotId = data.activeSnapshotId ?? null;
     workingStateCache = data.workingStateCache ?? null;
 
-    return true;
+    return blocks.length > 0 || snapshots.length > 0;
   } catch (e) {
     console.error("Failed to load context:", e);
     return false;
@@ -155,10 +156,14 @@ const activeStateLabel = $derived.by(() => {
 // ============================================================================
 
 function init(): void {
-  const loaded = loadFromLocalStorage();
-  if (!loaded) {
-    loadDemoData();
-  }
+  loadFromLocalStorage();
+  // Live proxy context is session-scoped: start empty on app launch.
+  blocks = [];
+  activeSnapshotId = null;
+  workingStateCache = null;
+  saveToLocalStorage();
+  // No demo data auto-load — start empty, blocks arrive via proxy capture.
+  // Call loadDemoData() explicitly from the empty state UI if needed.
 }
 
 function loadDemoData(): void {
@@ -247,9 +252,19 @@ function updateBlockContent(blockId: string, content: string): void {
   const index = getBlockIndex(blockId);
   if (index === -1) return;
 
-  const oldContent = blocks[index].content;
+  const block = blocks[index];
+  const oldContent = block.content;
   if (oldContent !== content) {
     editHistoryStore.recordEdit(blockId, "content", { content: oldContent }, { content });
+
+    // Queue hot patch so the edit takes effect on the next outbound request
+    invoke("queue_hot_patch", {
+      role: block.role,
+      originalContent: oldContent,
+      newContent: content,
+    }).catch(() => {
+      // Ignore errors when running outside Tauri (e.g., browser dev)
+    });
   }
 
   const tokens = Math.ceil(content.length / 4);
@@ -436,6 +451,49 @@ function getValidDropRange(zone: Zone): { min: number; max: number } {
   };
 }
 
+/** Add blocks received from the live proxy (replaces current context). */
+function setLiveBlocks(requestBlocks: Block[], responseBlocks: Block[]): void {
+  // Replace blocks with the full conversation from the latest request
+  // (request_blocks contain the entire conversation history sent to the API)
+  const allBlocks = [...requestBlocks, ...responseBlocks];
+  if (allBlocks.length === 0) return;
+  if (isLikelyCliStartupNoise(requestBlocks, responseBlocks)) return;
+
+  blocks = allBlocks;
+  markDirty();
+}
+
+/**
+ * Ignore known startup probe noise (e.g., tiny single-word user payloads like
+ * "count"/"foo" with no model response) so they don't clobber real context.
+ */
+function isLikelyCliStartupNoise(requestBlocks: Block[], responseBlocks: Block[]): boolean {
+  if (responseBlocks.length > 0) return false;
+  if (requestBlocks.length === 0 || requestBlocks.length > 2) return false;
+
+  return requestBlocks.every((block) => {
+    if (block.role !== "user") return false;
+    if (block.tokens > 2) return false;
+
+    const text = block.content.trim();
+    if (text.length === 0 || text.length > 12) return false;
+    return /^[a-z0-9_.-]+$/i.test(text);
+  });
+}
+
+/** Clear all live blocks (used on session reset). */
+function clearBlocks(): void {
+  blocks = [];
+  markDirty();
+}
+
+/** Append new response blocks to existing context (incremental). */
+function appendResponseBlocks(newBlocks: Block[]): void {
+  if (newBlocks.length === 0) return;
+  blocks = [...blocks, ...newBlocks];
+  markDirty();
+}
+
 function updateBlockHeat(blockId: string, heat: number): void {
   const index = getBlockIndex(blockId);
   if (index === -1) return;
@@ -581,6 +639,9 @@ export const contextStore = {
   init,
   flushPendingWrites,
   loadDemoData,
+  setLiveBlocks,
+  clearBlocks,
+  appendResponseBlocks,
   getBlock,
   getBlockIndex,
   moveBlock,

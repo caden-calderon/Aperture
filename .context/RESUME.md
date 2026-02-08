@@ -9,11 +9,11 @@
 
 | Field | Value |
 |-------|-------|
-| **Phase** | 0.5 — Foundation Hardening (complete); execution runway prepared for Phase 1 |
-| **Status** | ✅ COMPLETE |
+| **Phase** | 1 — Proxy Core (COMPLETE) |
+| **Status** | COMPLETE — All 7 steps done, `make check` passes |
 | **Last Updated** | 2026-02-08 |
 | **Blocking Issues** | None |
-| **Next Step** | Begin Phase 1 (Proxy Core) |
+| **Next Step** | Begin Phase 2: Context Engine |
 
 ---
 
@@ -37,7 +37,7 @@
 |-------|------|--------|-------|
 | 0 | UI Foundation | ✅ COMPLETE | Tauri + Svelte 5 shell, 20 components, full visual UI with mock data, theme customizer |
 | 0.5 | Foundation Hardening | ✅ COMPLETE | Composable extraction, component subdirs, performance fixes, backend scaffolding, documentation |
-| 1 | Proxy Core | PENDING | HTTP intercept, request/response capture, event bridge, hot patch wiring |
+| 1 | Proxy Core | ✅ COMPLETE | HTTP intercept, request/response capture, event bridge, hot patch wiring |
 | 2 | Context Engine | PENDING | Block/session engine, persistence, deterministic policy/action log foundation |
 | 3 | Dynamic Compression | PENDING | Multi-level compression, preview, queue contract, preserve-keys |
 | 4 | Heat & Clustering | PENDING | Usage heat, relevance, topic clusters, dedup, dynamic rebalancing |
@@ -991,15 +991,174 @@ make test-ui     # Frontend tests
 
 ---
 
+### 2026-02-08: Phase 1 — Proxy Core (Steps 1-4 Complete)
+
+**Completed:**
+
+#### Step 1: Request/Response Parser (`proxy/parser.rs`) — ✅ DONE
+- [x] `Provider` enum (Anthropic, OpenAI) with path-based detection
+- [x] `ParsedRequest` / `ParsedResponse` / `TokenUsage` output types
+- [x] Anthropic Messages API parser (`/v1/messages`) — system prompt (string + array), messages, tool_use, tool_result, image placeholders
+- [x] OpenAI Chat Completions parser (`/v1/chat/completions`) — system/user/assistant/tool messages, tool_calls
+- [x] OpenAI Responses API parser (`/v1/responses`) — string + array input, instructions, function_call output
+- [x] Unified `parse_request()` / `parse_response()` dispatch by path
+- [x] Block construction helpers with `estimate_tokens()` (chars/4 heuristic), UUID ids, ISO timestamps
+- [x] Default zone assignment: system→primacy, everything else→recency
+- [x] **29 unit tests** — all passing
+
+#### Step 2: Capture System (`proxy/capture.rs`) — ✅ DONE
+- [x] `CaptureStore` — `DashMap`-backed concurrent store for in-flight exchanges
+- [x] `CapturedExchange` — tracks request_id, provider, model, blocks, usage, status, SSE buffer
+- [x] `capture_request()` — parses and stores incoming requests
+- [x] `append_sse_chunk()` — accumulates streaming response chunks
+- [x] `finalize_streaming()` — reconstructs final response from SSE buffer (Anthropic + OpenAI formats)
+- [x] `capture_response()` — handles non-streaming responses
+- [x] SSE reconstruction: Anthropic (`message_start`/`content_block_delta`/`message_delta`) and OpenAI (`choices[].delta.content`)
+- [x] Eviction policy: max 100 completed exchanges
+- [x] **9 unit tests** — all passing
+
+#### Step 3: Event Dispatcher (`events/dispatcher.rs`) + Wiring — ✅ DONE
+- [x] `EventDispatcher<R: Runtime>` — typed wrapper around `AppHandle` for `ApertureEvent` emission
+- [x] `DynDispatcher` — type-erased wrapper for use in axum handlers (can't be generic over Runtime)
+- [x] Channel routing: `ResponseStreaming` → `aperture:stream-progress`, all others → `aperture:events`
+- [x] `BlocksCaptured` event variant added to `ApertureEvent` — carries full block data to frontend
+- [x] `ProxyState` extended with `capture: CaptureStore` and `dispatcher: Option<DynDispatcher>`
+- [x] `start_proxy()` now takes `Option<DynDispatcher>` parameter
+- [x] `lib.rs` updated: proxy now starts inside `tauri::Builder::setup()` hook with `AppHandle` access
+- [x] `handler.rs` fully rewritten: integrates capture + dispatch for both streaming and non-streaming paths
+- [x] SSE tee pattern: streaming responses are fanned out to both client AND capture accumulator via `mpsc` channel
+- [x] Streaming progress throttled to every ~4KB to avoid flooding the event bus
+- [x] Provider detection improved: `Bearer` tokens + path-based disambiguation (not just `sk-*` prefix)
+
+#### Step 4: Frontend Integration — ✅ DONE
+- [x] `connection.svelte.ts` — new store managing proxy connection lifecycle
+  - `ConnectionStatus`: disconnected | connecting | connected | error
+  - `StreamingState`: requestId, bytesReceived, provider
+  - Subscribes to `aperture:events` and `aperture:stream-progress` Tauri event channels
+  - `convertBlock()` — maps Rust snake_case Block to TypeScript camelCase Block
+  - `connect()` / `disconnect()` lifecycle with health check polling (5s interval)
+  - `onBlocksCaptured()` callback registration for context store wiring
+- [x] `context.svelte.ts` — added `setLiveBlocks()` and `appendResponseBlocks()` methods
+- [x] `+page.svelte` — wired `connectionStore.connect()` in `onMount`, registered block callback, cleanup on unmount
+- [x] `TitleBar.svelte` — live connection status indicator (dot + label), request count, active model display
+- [x] All stores re-exported from `index.ts`
+- [x] `svelte-check`: 0 errors, 0 warnings
+- [x] `vite build`: success
+
+**New Files Created:**
+- `src-tauri/src/proxy/parser.rs` — Request/response parsing (29 tests)
+- `src-tauri/src/proxy/capture.rs` — Capture store + SSE reconstruction (9 tests)
+- `src-tauri/src/events/dispatcher.rs` — Event emission to frontend
+- `src/lib/stores/connection.svelte.ts` — Connection state management
+
+**Files Modified:**
+- `src-tauri/Cargo.toml` — Added `bytes`, `futures-util`, `tokio-stream` deps
+- `src-tauri/src/lib.rs` — Proxy starts in `setup()` hook with AppHandle → DynDispatcher
+- `src-tauri/src/proxy/mod.rs` — ProxyState gains capture + dispatcher, `start_proxy()` takes dispatcher param
+- `src-tauri/src/proxy/handler.rs` — Full rewrite: capture integration, SSE tee, event emission
+- `src-tauri/src/events/mod.rs` — Added `dispatcher` module
+- `src-tauri/src/events/types.rs` — Added `BlocksCaptured` event variant with block data
+- `src/lib/stores/context.svelte.ts` — Added `setLiveBlocks()`, `appendResponseBlocks()`
+- `src/lib/stores/index.ts` — Export `connectionStore`
+- `src/lib/components/layout/TitleBar.svelte` — Live connection status display
+- `src/routes/+page.svelte` — Connection init, block callback, cleanup
+
+**Verification:**
+- `cargo test`: 49 tests passing (29 parser + 9 capture + 6 handler + 3 proxy + 2 terminal)
+- `cargo clippy -- -D warnings`: clean
+- `svelte-check`: 0 errors, 0 warnings
+- `vite build`: success
+
+---
+
+### 2026-02-08: Phase 1 — COMPLETE
+
+**Completed (Tasks 5-7):**
+
+#### Task 5: Provider-Aware Terminal Launch — ✅ DONE
+- [x] `spawn_shell` accepts optional `env_vars` parameter
+- [x] `spawn_provider_shell` command: injects `ANTHROPIC_BASE_URL` or `OPENAI_BASE_URL`/`OPENAI_API_BASE`
+- [x] `provider_env_vars()` helper builds correct env for each provider
+- [x] Provider selector + quick-launch menu in `TerminalPanel.svelte`
+- [x] `Terminal.svelte` gains `launchProvider()` method
+- [x] `terminalStore` gains `selectedProvider`, `launchStatus` state
+- [x] Status dot (running/launching/error) in terminal header
+- [x] 5 new unit tests for terminal provider env injection
+
+#### Task 6: Hot Patch Mode — ✅ DONE
+- [x] `HotPatch` struct: role, original_content, new_content, source
+- [x] `HotPatchQueue`: thread-safe `Mutex<Vec<HotPatch>>` with enqueue/drain/clear
+- [x] `apply_patches()`: modifies messages/system/input arrays via content matching
+- [x] Handler intercept: drains queue before forwarding, recalculates Content-Length
+- [x] Tauri commands: `queue_hot_patch`, `clear_hot_patches`, `pending_hot_patch_count`
+- [x] Shared `Arc<HotPatchQueue>` between proxy handler and Tauri state
+- [x] `updateBlockContent()` auto-queues hot patches via `invoke`
+- [x] `connectionStore.pendingHotPatches` + refresh on request capture
+- [x] TitleBar shows pending patch count (yellow warning color)
+- [x] 8 new unit tests for hot patch (queue + apply across all formats)
+
+#### Task 7: Integration Tests + Make Check — ✅ DONE
+- [x] 5 integration tests in `src-tauri/tests/proxy_flow.rs`:
+  - `test_anthropic_request_captures_blocks` — full Anthropic flow
+  - `test_openai_request_captures_blocks` — full OpenAI flow
+  - `test_hot_patch_modifies_forwarded_request` — hot patch applied
+  - `test_hot_patch_no_match_passes_through_unchanged` — graceful no-op
+  - `test_response_status_forwarded_correctly` — status passthrough
+- [x] Mock upstream server (axum) echoes requests for verification
+- [x] `make check` passes: 67 Rust tests + 8 frontend tests + clippy + svelte-check
+
+**New Files Created:**
+- `src-tauri/src/proxy/hot_patch.rs` — Hot patch queue + application logic
+- `src-tauri/tests/proxy_flow.rs` — Integration tests with mock upstream
+
+**Files Modified:**
+- `src-tauri/src/terminal/mod.rs` — Provider env helpers, spawn_provider_shell, 5 tests
+- `src-tauri/src/proxy/mod.rs` — HotPatchQueue in ProxyState, start_proxy accepts queue
+- `src-tauri/src/proxy/handler.rs` — Hot patch interception, Content-Length fix
+- `src-tauri/src/lib.rs` — Hot patch Tauri commands, shared queue, spawn_provider_shell
+- `src/lib/stores/terminal.svelte.ts` — Provider + launch status state
+- `src/lib/stores/connection.svelte.ts` — Pending hot patches count
+- `src/lib/stores/context.svelte.ts` — Auto-queue hot patches on block edit
+- `src/lib/components/features/Terminal.svelte` — launchProvider(), provider-aware spawn
+- `src/lib/components/layout/TerminalPanel.svelte` — Provider selector, quick-launch menu
+- `src/lib/components/layout/TitleBar.svelte` — Hot patch indicator
+
+**Test Summary:**
+| Category | Count |
+|----------|-------|
+| Parser unit tests | 29 |
+| Capture unit tests | 9 |
+| Handler unit tests | 6 |
+| Proxy unit tests | 3 |
+| Hot patch unit tests | 8 |
+| Terminal unit tests | 7 |
+| Integration tests | 5 |
+| Frontend tests | 8 |
+| **Total** | **75** |
+
+**Phase 1 status: COMPLETE**
+
+---
+
+### Known Bugs (Fix Before Phase 2)
+
+1. **Codex `/responses` path mismatch**: Codex hits `localhost:5400/responses` (no `/v1/` prefix). `determine_upstream()` and `Provider::from_path()` only check `/v1/responses` → defaults to Anthropic → rejected. Fix: broaden path matching in `handler.rs` and `parser.rs`.
+
+2. **Hot patch reverts on next capture**: Capture runs before patches are applied, so `setLiveBlocks()` replaces blocks with pre-patch content on the next request. Fix options: (a) capture after patching, (b) preserve user edits separately, (c) defer to Phase 2 block versioning.
+
+3. **Thinking blocks render as raw JSON**: Extended thinking blocks (with `signature`/`thinking`) display as raw JSON. Could parse and collapse specially.
+
+4. **Demo data removed from auto-load**: Fixed — `init()` no longer calls `loadDemoData()`. Empty state shows until proxy traffic arrives or user clicks "Load Demo Data".
+
+---
+
 ### Next Session
 
-**Begin Phase 1: Proxy Core**
+**Fix known bugs above, then begin Phase 2: Context Engine**
 
-Read `.context/phases/phase-1.md` for full details. Key starting points:
-- Proxy exists at `src-tauri/src/proxy/` (mod.rs, handler.rs, error.rs)
-- Engine skeleton at `src-tauri/src/engine/` (block.rs, types.rs)
-- Events skeleton at `src-tauri/src/events/` (types.rs with ApertureEvent enum)
-- `dashmap` already in Cargo.toml for concurrent state
-
-**Also pending:**
-- [ ] Test all features in `npm run tauri dev` (full desktop app)
+Read `.context/phases/phase-2.md` for details. Key deliverables:
+- Block storage + persistence (Rust engine)
+- Deterministic dependency tracking
+- Basic block versioning
+- Budget alerts
+- Wire frontend stores to engine state

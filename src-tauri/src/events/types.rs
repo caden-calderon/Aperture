@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::engine::block::Block;
+
 /// Events emitted by the Aperture backend.
 ///
 /// These are sent to the frontend via Tauri's event system
@@ -15,6 +17,17 @@ pub enum ApertureEvent {
         method: String,
         path: String,
         provider: String,
+    },
+
+    /// Parsed blocks from a captured request/response exchange.
+    BlocksCaptured {
+        request_id: String,
+        provider: String,
+        model: String,
+        request_blocks: Vec<Block>,
+        response_blocks: Vec<Block>,
+        input_tokens: Option<u32>,
+        output_tokens: Option<u32>,
     },
 
     /// An SSE response is being streamed.
