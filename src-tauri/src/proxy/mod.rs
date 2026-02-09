@@ -10,6 +10,7 @@ pub mod error;
 pub mod handler;
 pub mod hot_patch;
 pub mod parser;
+pub mod provider_adapter;
 
 use axum::{routing::any, Router};
 use reqwest::Client;

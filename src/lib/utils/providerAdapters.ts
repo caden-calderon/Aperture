@@ -1,5 +1,11 @@
 export type LaunchProviderId = 'anthropic' | 'openai' | 'openai_proxy';
 
+export interface ProviderCapabilities {
+  supportsUsage: boolean;
+  supportsReasoning: boolean;
+  supportsResumeId: boolean;
+}
+
 export interface ProviderAdapter {
   id: LaunchProviderId;
   label: string;
@@ -8,6 +14,7 @@ export interface ProviderAdapter {
   transport: 'proxy' | 'direct_cli_bridge';
   startsCodexBridge: boolean;
   startupMarkers: readonly string[];
+  capabilities: ProviderCapabilities;
 }
 
 const PROVIDER_ADAPTERS: Record<LaunchProviderId, ProviderAdapter> = {
@@ -19,6 +26,11 @@ const PROVIDER_ADAPTERS: Record<LaunchProviderId, ProviderAdapter> = {
     transport: 'proxy',
     startsCodexBridge: false,
     startupMarkers: [],
+    capabilities: {
+      supportsUsage: true,
+      supportsReasoning: true,
+      supportsResumeId: false,
+    },
   },
   openai: {
     id: 'openai',
@@ -28,6 +40,11 @@ const PROVIDER_ADAPTERS: Record<LaunchProviderId, ProviderAdapter> = {
     transport: 'direct_cli_bridge',
     startsCodexBridge: true,
     startupMarkers: ['OpenAI Codex', 'codex resume '],
+    capabilities: {
+      supportsUsage: false,
+      supportsReasoning: true,
+      supportsResumeId: true,
+    },
   },
   openai_proxy: {
     id: 'openai_proxy',
@@ -37,6 +54,11 @@ const PROVIDER_ADAPTERS: Record<LaunchProviderId, ProviderAdapter> = {
     transport: 'proxy',
     startsCodexBridge: false,
     startupMarkers: [],
+    capabilities: {
+      supportsUsage: true,
+      supportsReasoning: true,
+      supportsResumeId: true,
+    },
   },
 };
 
@@ -55,3 +77,26 @@ export function shouldStartCodexBridgeFromOutput(text: string): boolean {
   return adapter.startupMarkers.some((marker) => text.includes(marker));
 }
 
+/**
+ * Best-effort inference for provider launched manually in the shell.
+ * Matches direct command invocations like:
+ * - `claude`
+ * - `claude-code --resume`
+ * - `/usr/local/bin/codex resume ...`
+ */
+export function inferManualLaunchProvider(commandLine: string): LaunchProviderId | null {
+  const firstToken = commandLine.trim().split(/\s+/)[0];
+  if (!firstToken) return null;
+
+  const binary = firstToken.split('/').pop()?.toLowerCase() ?? firstToken.toLowerCase();
+  if (binary === 'claude' || binary === 'claude-code') return 'anthropic';
+  if (binary === 'codex') return 'openai';
+  return null;
+}
+
+export function formatProviderCapabilities(capabilities: ProviderCapabilities): string {
+  const usage = capabilities.supportsUsage ? 'usage' : 'no-usage';
+  const reasoning = capabilities.supportsReasoning ? 'reasoning' : 'no-reasoning';
+  const resume = capabilities.supportsResumeId ? 'resume-id' : 'no-resume-id';
+  return `${usage} · ${reasoning} · ${resume}`;
+}

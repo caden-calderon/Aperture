@@ -9,6 +9,7 @@
   import { connectionStore } from "$lib/stores/connection.svelte";
   import { themeStore } from "$lib/stores/theme.svelte";
   import {
+    inferManualLaunchProvider,
     getProviderAdapter,
     shouldStartCodexBridgeFromOutput,
     type LaunchProviderId,
@@ -24,6 +25,7 @@
   let codexBridgeRunning = $state(false);
   let codexBridgeStarting = $state(false);
   let launchInFlight = $state(false);
+  let inputLineBuffer = $state('');
 
   async function startCodexSubscriptionBridge(): Promise<void> {
     if (codexBridgeRunning || codexBridgeStarting) return;
@@ -58,6 +60,41 @@
       terminalStore.setSelectedProvider('openai');
       terminalStore.setLaunchStatus('running');
       void startCodexSubscriptionBridge();
+    }
+  }
+
+  async function applyManualProviderDetection(commandLine: string): Promise<void> {
+    const provider = inferManualLaunchProvider(commandLine);
+    if (!provider) return;
+
+    connectionStore.clearSession();
+    terminalStore.setSelectedProvider(provider);
+    terminalStore.setLaunchStatus('running');
+
+    if (provider === 'openai') {
+      await startCodexSubscriptionBridge();
+    } else {
+      await stopCodexSubscriptionBridge();
+    }
+  }
+
+  function trackCommandBuffer(data: string): void {
+    for (const char of data) {
+      if (char === '\r' || char === '\n') {
+        const command = inputLineBuffer.trim();
+        inputLineBuffer = '';
+        if (command) {
+          void applyManualProviderDetection(command);
+        }
+        continue;
+      }
+      if (char === '\u007f') {
+        inputLineBuffer = inputLineBuffer.slice(0, -1);
+        continue;
+      }
+      if (char >= ' ' && char <= '~') {
+        inputLineBuffer += char;
+      }
     }
   }
 
@@ -207,6 +244,7 @@
         }
         return;
       }
+      trackCommandBuffer(data);
       const sessionId = terminalStore.sessionId;
       if (sessionId) {
         invoke('send_input', { sessionId, data }).catch(() => {});
@@ -224,6 +262,7 @@
   });
 
   function cleanup() {
+    inputLineBuffer = '';
     unlistenOutput?.();
     unlistenOutput = null;
     unlistenExit?.();

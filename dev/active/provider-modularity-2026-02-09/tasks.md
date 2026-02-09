@@ -13,9 +13,9 @@
 - [x] Verify launch status states are deterministic and sourced from one reducer.
 
 ## Expansion Readiness
-- [ ] Add provider onboarding template/checklist for Gemini CLI, OpenCode, KiloCode.
+- [x] Add provider onboarding template/checklist for Gemini CLI, OpenCode, KiloCode.
 - [x] Ensure adding a provider requires no core store edits.
-- [ ] Add adapter capability matrix doc (available metadata, reasoning visibility, usage counters).
+- [x] Add adapter capability matrix doc (available metadata, reasoning visibility, usage counters).
 
 ## Performance + Reliability
 - [x] Re-check proxy and stream hot paths for blocking calls.
@@ -28,6 +28,6 @@
 - [x] Add/adjust tests for provider lifecycle transitions and parser normalization edge cases.
 
 ## Follow-up Tasks
-- [ ] Add backend parser adapter trait to mirror frontend provider adapter contract for Gemini CLI/OpenCode/KiloCode.
-- [ ] Add explicit terminal/provider lifecycle tests around manual `claude` command detection and status convergence.
-- [ ] Add capability flags (`supports_usage`, `supports_reasoning`, `supports_resume_id`) to the provider adapter contract and expose in UI.
+- [x] Add backend parser adapter trait to mirror frontend provider adapter contract for Gemini CLI/OpenCode/KiloCode.
+- [x] Add explicit terminal/provider lifecycle tests around manual `claude` command detection and status convergence.
+- [x] Add capability flags (`supports_usage`, `supports_reasoning`, `supports_resume_id`) to the provider adapter contract and expose in UI.

@@ -10,9 +10,12 @@ export {
   type TypeSelection,
 } from './blockTypes';
 export {
+  formatProviderCapabilities,
   getProviderAdapter,
+  inferManualLaunchProvider,
   listProviderAdapters,
   shouldStartCodexBridgeFromOutput,
   type LaunchProviderId,
   type ProviderAdapter,
+  type ProviderCapabilities,
 } from './providerAdapters';

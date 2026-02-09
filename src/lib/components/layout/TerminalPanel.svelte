@@ -1,7 +1,11 @@
 <script lang="ts">
   import Terminal from "../features/Terminal.svelte";
   import { terminalStore, type TerminalProvider } from "$lib/stores/terminal.svelte";
-  import { listProviderAdapters, type LaunchProviderId } from "$lib/utils/providerAdapters";
+  import {
+    formatProviderCapabilities,
+    listProviderAdapters,
+    type LaunchProviderId,
+  } from "$lib/utils/providerAdapters";
 
   let terminalRef = $state<ReturnType<typeof Terminal> | null>(null);
   let showProviderMenu = $state(false);
@@ -125,7 +129,10 @@
                     disabled={terminalStore.launchStatus === 'launching'}
                   >
                     <span class="provider-dot {providerDotClass(adapter.id)}"></span>
-                    {adapter.quickLaunchLabel}
+                    <span>{adapter.quickLaunchLabel}</span>
+                    <span class="provider-capabilities">
+                      {formatProviderCapabilities(adapter.capabilities)}
+                    </span>
                   </button>
                 {/each}
                 <div class="provider-hint">
@@ -347,7 +354,8 @@
 
   .provider-option {
     display: flex;
-    align-items: center;
+    align-items: baseline;
+    flex-wrap: wrap;
     gap: 6px;
     width: 100%;
     padding: 5px 8px;
@@ -365,6 +373,11 @@
     background: var(--bg-hover);
   }
 
+  .provider-option:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+
   .provider-dot {
     width: 6px;
     height: 6px;
@@ -378,6 +391,14 @@
 
   .openai-dot {
     background: #74c7a0;
+  }
+
+  .provider-capabilities {
+    width: 100%;
+    margin-left: 12px;
+    color: var(--text-muted);
+    font-size: 9px;
+    letter-spacing: 0.2px;
   }
 
   .provider-hint {

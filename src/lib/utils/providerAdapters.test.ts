@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  formatProviderCapabilities,
   getProviderAdapter,
+  inferManualLaunchProvider,
   listProviderAdapters,
   shouldStartCodexBridgeFromOutput,
 } from "./providerAdapters";
@@ -17,6 +19,7 @@ describe("provider adapters", () => {
     expect(adapter.command).toBe("codex");
     expect(adapter.transport).toBe("direct_cli_bridge");
     expect(adapter.startsCodexBridge).toBe(true);
+    expect(adapter.capabilities.supportsUsage).toBe(false);
   });
 
   it("only starts codex bridge for known startup markers", () => {
@@ -24,5 +27,21 @@ describe("provider adapters", () => {
     expect(shouldStartCodexBridgeFromOutput("Run `codex resume abc` to continue")).toBe(true);
     expect(shouldStartCodexBridgeFromOutput("Claude Code ready")).toBe(false);
   });
-});
 
+  it("infers provider for manual launch commands", () => {
+    expect(inferManualLaunchProvider("claude")).toBe("anthropic");
+    expect(inferManualLaunchProvider("claude-code --resume abc")).toBe("anthropic");
+    expect(inferManualLaunchProvider("/usr/local/bin/codex resume foo")).toBe("openai");
+    expect(inferManualLaunchProvider("echo codex")).toBeNull();
+  });
+
+  it("formats capability summary for UI labels", () => {
+    expect(
+      formatProviderCapabilities({
+        supportsUsage: true,
+        supportsReasoning: false,
+        supportsResumeId: true,
+      })
+    ).toBe("usage · no-reasoning · resume-id");
+  });
+});
