@@ -10,10 +10,24 @@
 | Field | Value |
 |-------|-------|
 | **Phase** | 1 — Proxy Core (COMPLETE) |
-| **Status** | COMPLETE — All 7 steps done, `make check` passes |
-| **Last Updated** | 2026-02-08 |
+| **Status** | COMPLETE — Phase 1 delivered + provider modularity follow-up pass complete |
+| **Last Updated** | 2026-02-09 |
 | **Blocking Issues** | None |
 | **Next Step** | Begin Phase 2: Context Engine |
+
+---
+
+## Active Handoff (2026-02-09)
+
+Provider modularity and expansion prep is checkpointed for next session in:
+- `dev/active/provider-modularity-2026-02-09/plan.md`
+- `dev/active/provider-modularity-2026-02-09/context.md`
+- `dev/active/provider-modularity-2026-02-09/tasks.md`
+
+Focus:
+- Keep core context engine/store provider-neutral
+- Keep provider logic at launch/transport/parser boundaries
+- Prepare adapter-ready path for Gemini CLI, OpenCode, and KiloCode
 
 ---
 
@@ -1123,7 +1137,7 @@ make test-ui     # Frontend tests
 - `src/lib/components/layout/TerminalPanel.svelte` — Provider selector, quick-launch menu
 - `src/lib/components/layout/TitleBar.svelte` — Hot patch indicator
 
-**Test Summary:**
+**Test Summary (Phase 1 closeout):**
 | Category | Count |
 |----------|-------|
 | Parser unit tests | 29 |
@@ -1136,25 +1150,43 @@ make test-ui     # Frontend tests
 | Frontend tests | 8 |
 | **Total** | **75** |
 
+**Validation snapshot (2026-02-09 modularity pass):**
+- Rust unit tests: 97
+- Rust integration tests: 8
+- Frontend tests: 15
+- `make check`: pass
+- `npm run build`: pass
+
 **Phase 1 status: COMPLETE**
 
 ---
 
-### Known Bugs (Fix Before Phase 2)
+### 2026-02-09: Provider Modularity Follow-up Complete
 
-1. **Codex `/responses` path mismatch**: Codex hits `localhost:5400/responses` (no `/v1/` prefix). `determine_upstream()` and `Provider::from_path()` only check `/v1/responses` → defaults to Anthropic → rejected. Fix: broaden path matching in `handler.rs` and `parser.rs`.
+**Completed:**
+- [x] Provider adapter contract extracted for frontend launch/lifecycle/capabilities (`src/lib/utils/providerAdapters.ts`)
+- [x] Manual terminal launch parity improved (`claude`/`claude-code`/`codex` inference converges to unified status + bridge behavior)
+- [x] Quick-launch flow hardened (launch re-entry guard + atomic listener setup)
+- [x] Backend parser adapter trait added with Anthropic/OpenAI implementations and Gemini/OpenCode/KiloCode placeholders (`src-tauri/src/proxy/provider_adapter.rs`)
+- [x] Provider onboarding template added (`dev/active/provider-modularity-2026-02-09/provider-onboarding-template.md`)
+- [x] Capability matrix doc added (`docs/PROVIDER_CAPABILITY_MATRIX.md`)
+- [x] Validation: `make check` + `npm run build` pass
 
-2. **Hot patch reverts on next capture**: Capture runs before patches are applied, so `setLiveBlocks()` replaces blocks with pre-patch content on the next request. Fix options: (a) capture after patching, (b) preserve user edits separately, (c) defer to Phase 2 block versioning.
+---
 
-3. **Thinking blocks render as raw JSON**: Extended thinking blocks (with `signature`/`thinking`) display as raw JSON. Could parse and collapse specially.
+### Known Risks / Follow-ups (Before or During Phase 2)
 
-4. **Demo data removed from auto-load**: Fixed — `init()` no longer calls `loadDemoData()`. Empty state shows until proxy traffic arrives or user clicks "Load Demo Data".
+1. **Codex direct bridge polling overhead**: `terminal/codex_bridge.rs` polls and spawns `codex app-server` periodically. Works correctly but can be optimized for lower background overhead.
+
+2. **Streaming capture memory growth**: `proxy/capture.rs` accumulates full SSE text in-memory per exchange before reconstruction. Acceptable for current scope, but large streams can increase memory pressure.
+
+3. **Frontend bundle warning**: Vite warns on one large client chunk (>500k minified). Not a functional blocker for Tauri desktop, but worth splitting before later feature growth.
 
 ---
 
 ### Next Session
 
-**Fix known bugs above, then begin Phase 2: Context Engine**
+**Begin Phase 2: Context Engine**
 
 Read `.context/phases/phase-2.md` for details. Key deliverables:
 - Block storage + persistence (Rust engine)
@@ -1162,3 +1194,7 @@ Read `.context/phases/phase-2.md` for details. Key deliverables:
 - Basic block versioning
 - Budget alerts
 - Wire frontend stores to engine state
+
+Maintain during Phase 2:
+- Provider-specific logic only at launch/transport/parser adapter boundaries
+- Core engine/store provider-neutral
