@@ -6,8 +6,10 @@
 // Types
 // ============================================================================
 
+import type { LaunchProviderId } from "$lib/utils/providerAdapters";
+
 export type TerminalPosition = 'bottom' | 'right';
-export type TerminalProvider = 'anthropic' | 'openai' | 'openai_proxy' | 'none';
+export type TerminalProvider = LaunchProviderId | 'none';
 export type LaunchStatus = 'idle' | 'launching' | 'running' | 'error';
 
 // ============================================================================

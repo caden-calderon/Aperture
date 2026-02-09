@@ -8,6 +8,11 @@
   import { terminalStore } from "$lib/stores/terminal.svelte";
   import { connectionStore } from "$lib/stores/connection.svelte";
   import { themeStore } from "$lib/stores/theme.svelte";
+  import {
+    getProviderAdapter,
+    shouldStartCodexBridgeFromOutput,
+    type LaunchProviderId,
+  } from "$lib/utils/providerAdapters";
 
   let containerEl = $state<HTMLDivElement | null>(null);
   let terminal: Terminal | null = null;
@@ -17,30 +22,41 @@
   let unlistenOutput: UnlistenFn | null = null;
   let unlistenExit: UnlistenFn | null = null;
   let codexBridgeRunning = $state(false);
+  let codexBridgeStarting = $state(false);
+  let launchInFlight = $state(false);
 
   async function startCodexSubscriptionBridge(): Promise<void> {
+    if (codexBridgeRunning || codexBridgeStarting) return;
+    codexBridgeStarting = true;
     try {
       await invoke<boolean>('start_codex_subscription_bridge');
       codexBridgeRunning = true;
     } catch {
       // Ignore outside Tauri / unsupported runtime
+    } finally {
+      codexBridgeStarting = false;
     }
   }
 
   async function stopCodexSubscriptionBridge(): Promise<void> {
+    if (!codexBridgeRunning && !codexBridgeStarting) return;
     try {
       await invoke<boolean>('stop_codex_subscription_bridge');
       codexBridgeRunning = false;
     } catch {
       // Ignore outside Tauri / unsupported runtime
+    } finally {
+      codexBridgeStarting = false;
     }
   }
 
   function maybeStartCodexBridgeFromOutput(text: string): void {
-    if (codexBridgeRunning) return;
-
-    // Covers startup banner and resume hint text in Codex TUI output.
-    if (text.includes('OpenAI Codex') || text.includes('codex resume ')) {
+    if (codexBridgeRunning || codexBridgeStarting) return;
+    if (shouldStartCodexBridgeFromOutput(text)) {
+      // Manual `codex` launch should converge with quick-launch behavior.
+      connectionStore.clearSession();
+      terminalStore.setSelectedProvider('openai');
+      terminalStore.setLaunchStatus('running');
       void startCodexSubscriptionBridge();
     }
   }
@@ -62,22 +78,38 @@
       terminalStore.setSessionId(id);
       terminalStore.setExited(false);
 
-      unlistenOutput = await listen<[string, string]>('terminal:output', (event) => {
-        const [sid, data] = event.payload;
-        if (sid === terminalStore.sessionId && terminal) {
-          terminal.write(data);
-          maybeStartCodexBridgeFromOutput(data);
-        }
-      });
+      // Register listeners atomically to avoid partial listener leaks on failure.
+      let nextUnlistenOutput: UnlistenFn | null = null;
+      let nextUnlistenExit: UnlistenFn | null = null;
+      try {
+        nextUnlistenOutput = await listen<[string, string]>('terminal:output', (event) => {
+          const [sid, data] = event.payload;
+          if (sid === terminalStore.sessionId && terminal) {
+            terminal.write(data);
+            maybeStartCodexBridgeFromOutput(data);
+          }
+        });
 
-      unlistenExit = await listen<string>('terminal:exit', (event) => {
-        if (event.payload === terminalStore.sessionId) {
-          terminalStore.setExited(true);
-          terminalStore.setLaunchStatus('idle');
-          connectionStore.clearSession();
-          terminal?.write('\r\n\x1b[90m[Process exited — press Enter to restart]\x1b[0m\r\n');
-        }
-      });
+        nextUnlistenExit = await listen<string>('terminal:exit', (event) => {
+          if (event.payload === terminalStore.sessionId) {
+            terminalStore.setExited(true);
+            terminalStore.setLaunchStatus('idle');
+            terminalStore.setSelectedProvider('none');
+            connectionStore.clearSession();
+            void stopCodexSubscriptionBridge();
+            terminal?.write('\r\n\x1b[90m[Process exited — press Enter to restart]\x1b[0m\r\n');
+          }
+        });
+      } catch (listenerError) {
+        nextUnlistenOutput?.();
+        nextUnlistenExit?.();
+        await invoke('kill_session', { sessionId: id }).catch(() => {});
+        terminalStore.setSessionId(null);
+        throw listenerError;
+      }
+
+      unlistenOutput = nextUnlistenOutput;
+      unlistenExit = nextUnlistenExit;
       return true;
     } catch (e) {
       console.error('Failed to spawn shell:', e);
@@ -93,26 +125,36 @@
    * - openai: Codex direct (ChatGPT subscription mode)
    * - openai_proxy: Codex via Aperture proxy (API key/scopes required)
    */
-  export async function launchProvider(provider: 'anthropic' | 'openai' | 'openai_proxy') {
+  export async function launchProvider(provider: LaunchProviderId) {
+    if (launchInFlight) return;
+    launchInFlight = true;
+
     // Provider switch = new client session; clear old live context first.
     connectionStore.clearSession();
 
-    // Kill existing session first
-    cleanup();
-    terminal?.clear();
+    try {
+      // Kill existing session first
+      cleanup();
+      terminal?.clear();
 
-    terminalStore.setSelectedProvider(provider);
-    terminalStore.setLaunchStatus('launching');
+      const adapter = getProviderAdapter(provider);
+      terminalStore.setSelectedProvider(provider);
+      terminalStore.setLaunchStatus('launching');
 
-    if (provider === 'openai') {
-      await startCodexSubscriptionBridge();
-    } else {
-      await stopCodexSubscriptionBridge();
+      if (adapter.startsCodexBridge) {
+        await startCodexSubscriptionBridge();
+      } else {
+        await stopCodexSubscriptionBridge();
+      }
+
+      const ok = await spawnShell(provider, adapter.command);
+      terminalStore.setLaunchStatus(ok ? 'running' : 'error');
+      if (!ok) {
+        terminalStore.setSelectedProvider('none');
+      }
+    } finally {
+      launchInFlight = false;
     }
-
-    const command = provider === 'anthropic' ? 'claude' : 'codex';
-    const ok = await spawnShell(provider, command);
-    terminalStore.setLaunchStatus(ok ? 'running' : 'error');
   }
 
   function doFit() {
@@ -160,7 +202,8 @@
         if (data === '\r') {
           cleanup();
           terminal?.clear();
-          spawnShell();
+          terminalStore.setSelectedProvider('none');
+          void spawnShell();
         }
         return;
       }
@@ -177,7 +220,7 @@
     });
     resizeObserver.observe(containerEl);
 
-    spawnShell();
+    void spawnShell();
   });
 
   function cleanup() {

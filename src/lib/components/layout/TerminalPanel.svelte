@@ -1,9 +1,11 @@
 <script lang="ts">
   import Terminal from "../features/Terminal.svelte";
   import { terminalStore, type TerminalProvider } from "$lib/stores/terminal.svelte";
+  import { listProviderAdapters, type LaunchProviderId } from "$lib/utils/providerAdapters";
 
   let terminalRef = $state<ReturnType<typeof Terminal> | null>(null);
   let showProviderMenu = $state(false);
+  const launchAdapters = listProviderAdapters();
 
   export function focusTerminal() {
     terminalRef?.focus();
@@ -33,9 +35,10 @@
     terminalStore.expandFromCollapsed();
   }
 
-  function handleLaunch(provider: 'anthropic' | 'openai' | 'openai_proxy') {
+  function handleLaunch(provider: LaunchProviderId) {
+    if (terminalStore.launchStatus === 'launching') return;
     showProviderMenu = false;
-    terminalRef?.launchProvider(provider);
+    void terminalRef?.launchProvider(provider);
   }
 
   function toggleProviderMenu() {
@@ -47,11 +50,15 @@
   }
 
   const providerLabel: Record<TerminalProvider, string> = {
-    anthropic: 'Claude',
-    openai: 'Codex Direct',
-    openai_proxy: 'Codex Proxy',
+    anthropic: launchAdapters.find((a) => a.id === 'anthropic')?.label ?? 'Claude',
+    openai: launchAdapters.find((a) => a.id === 'openai')?.label ?? 'Codex Direct',
+    openai_proxy: launchAdapters.find((a) => a.id === 'openai_proxy')?.label ?? 'Codex Proxy',
     none: 'Shell',
   };
+
+  function providerDotClass(provider: LaunchProviderId): string {
+    return provider === 'anthropic' ? 'anthropic-dot' : 'openai-dot';
+  }
 
   let statusDot = $derived(
     terminalStore.launchStatus === 'running' ? 'status-running' :
@@ -99,6 +106,7 @@
               class="terminal-btn launch-btn"
               title="Launch provider CLI"
               onclick={toggleProviderMenu}
+              disabled={terminalStore.launchStatus === 'launching'}
             >
               <!-- Provider launch icon (play triangle + connection dots) -->
               <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -110,18 +118,16 @@
             {#if showProviderMenu}
               <!-- svelte-ignore a11y_no_static_element_interactions -->
               <div class="provider-menu" onmouseleave={closeProviderMenu}>
-                <button class="provider-option" onclick={() => handleLaunch('anthropic')}>
-                  <span class="provider-dot anthropic-dot"></span>
-                  Claude Code
-                </button>
-                <button class="provider-option" onclick={() => handleLaunch('openai')}>
-                  <span class="provider-dot openai-dot"></span>
-                  Codex (ChatGPT Direct)
-                </button>
-                <button class="provider-option" onclick={() => handleLaunch('openai_proxy')}>
-                  <span class="provider-dot openai-dot"></span>
-                  Codex (API via Proxy)
-                </button>
+                {#each launchAdapters as adapter (adapter.id)}
+                  <button
+                    class="provider-option"
+                    onclick={() => handleLaunch(adapter.id)}
+                    disabled={terminalStore.launchStatus === 'launching'}
+                  >
+                    <span class="provider-dot {providerDotClass(adapter.id)}"></span>
+                    {adapter.quickLaunchLabel}
+                  </button>
+                {/each}
                 <div class="provider-hint">
                   Direct uses ChatGPT login. Proxy mode needs `api.responses.write`.
                 </div>

@@ -486,6 +486,9 @@ async fn test_proxy_hot_path_overhead_local_average_under_25ms() {
     let direct_avg_ms = direct_total_ms / samples as f64;
     let proxy_avg_ms = proxy_total_ms / samples as f64;
     let overhead_ms = (proxy_avg_ms - direct_avg_ms).max(0.0);
+    eprintln!(
+        "proxy hot-path overhead: direct_avg={direct_avg_ms:.2}ms proxy_avg={proxy_avg_ms:.2}ms overhead={overhead_ms:.2}ms"
+    );
 
     assert!(
         overhead_ms < 25.0,

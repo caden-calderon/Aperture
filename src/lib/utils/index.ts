@@ -9,3 +9,10 @@ export {
   resolveTypeSelection,
   type TypeSelection,
 } from './blockTypes';
+export {
+  getProviderAdapter,
+  listProviderAdapters,
+  shouldStartCodexBridgeFromOutput,
+  type LaunchProviderId,
+  type ProviderAdapter,
+} from './providerAdapters';
