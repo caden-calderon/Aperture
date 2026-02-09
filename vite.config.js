@@ -5,6 +5,19 @@ import tailwindcss from "@tailwindcss/vite";
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
 
+/**
+ * Manual chunking for large vendor deps to keep bundle growth manageable.
+ * @param {string} id
+ * @returns {string | undefined}
+ */
+function manualChunks(id) {
+  if (!id.includes("node_modules")) return undefined;
+  if (id.includes("/node_modules/@xterm/")) return "vendor-xterm";
+  if (id.includes("/node_modules/prismjs/")) return "vendor-prism";
+  if (id.includes("/node_modules/@tauri-apps/api/")) return "vendor-tauri-api";
+  return undefined;
+}
+
 // https://vite.dev/config/
 export default defineConfig(async () => ({
   plugins: [sveltekit(), tailwindcss()],
@@ -16,6 +29,13 @@ export default defineConfig(async () => ({
   //
   // 1. prevent Vite from obscuring rust errors
   clearScreen: false,
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks,
+      },
+    },
+  },
   // 2. tauri expects a fixed port, fail if that port is not available
   server: {
     port: 1420,

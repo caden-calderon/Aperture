@@ -18,7 +18,8 @@ use crate::engine::block::{Block, BlockMetadata, CompressionVersion, Compression
 use crate::engine::types::{BuiltInZone, CompressionLevel, Role, Zone};
 use crate::events::types::{channels, ApertureEvent};
 
-const CODEX_POLL_INTERVAL: Duration = Duration::from_millis(1500);
+const CODEX_BASE_POLL_INTERVAL: Duration = Duration::from_millis(1500);
+const CODEX_MAX_POLL_INTERVAL: Duration = Duration::from_millis(12000);
 const LOOP_SLEEP_INTERVAL: Duration = Duration::from_millis(250);
 
 pub struct CodexBridgeHandle {
@@ -58,8 +59,9 @@ fn run_loop(app: AppHandle, stop_rx: Receiver<()>) {
     let mut cursor = file_len_or_zero(&history_path);
     let mut active_session_id: Option<String> = None;
     let mut last_emitted_digest: Option<u64> = None;
+    let mut poll_interval = CODEX_BASE_POLL_INTERVAL;
     let mut last_poll = Instant::now()
-        .checked_sub(CODEX_POLL_INTERVAL)
+        .checked_sub(CODEX_BASE_POLL_INTERVAL)
         .unwrap_or_else(Instant::now);
     let mut last_error: Option<String> = None;
 
@@ -75,7 +77,14 @@ fn run_loop(app: AppHandle, stop_rx: Receiver<()>) {
             Ok((entries, new_cursor)) => {
                 cursor = new_cursor;
                 for entry in entries {
+                    let session_changed =
+                        active_session_id.as_deref() != Some(entry.session_id.as_str());
                     active_session_id = Some(entry.session_id);
+                    if session_changed {
+                        // New active session should refresh quickly and emit fresh context once.
+                        last_emitted_digest = None;
+                        poll_interval = CODEX_BASE_POLL_INTERVAL;
+                    }
                     let _ = entry;
                 }
             }
@@ -88,22 +97,35 @@ fn run_loop(app: AppHandle, stop_rx: Receiver<()>) {
             }
         }
 
-        let should_poll = last_poll.elapsed() >= CODEX_POLL_INTERVAL;
+        let should_poll = last_poll.elapsed() >= poll_interval;
         if should_poll {
             last_poll = Instant::now();
 
             if let Some(ref session_id) = active_session_id {
+                let fetch_start = Instant::now();
                 match fetch_thread_blocks(session_id) {
                     Ok(blocks) if !blocks.is_empty() => {
                         let digest = digest_blocks(&blocks);
                         if Some(digest) != last_emitted_digest {
                             emit_codex_blocks(&app, session_id, blocks);
                             last_emitted_digest = Some(digest);
+                            poll_interval = CODEX_BASE_POLL_INTERVAL;
+                        } else {
+                            poll_interval = next_poll_interval(poll_interval);
                         }
+                        debug!(
+                            session_id,
+                            fetch_ms = fetch_start.elapsed().as_millis() as u64,
+                            poll_interval_ms = poll_interval.as_millis() as u64,
+                            "Codex bridge poll complete"
+                        );
                         last_error = None;
                     }
-                    Ok(_) => {}
+                    Ok(_) => {
+                        poll_interval = next_poll_interval(poll_interval);
+                    }
                     Err(e) => {
+                        poll_interval = next_poll_interval(poll_interval);
                         if last_error.as_deref() != Some(e.as_str()) {
                             warn!("Codex bridge fetch failed: {e}");
                             app.emit(
@@ -118,11 +140,18 @@ fn run_loop(app: AppHandle, stop_rx: Receiver<()>) {
                         }
                     }
                 }
+            } else {
+                // No active Codex session observed yet — check less aggressively.
+                poll_interval = next_poll_interval(poll_interval);
             }
         }
 
         thread::sleep(LOOP_SLEEP_INTERVAL);
     }
+}
+
+fn next_poll_interval(current: Duration) -> Duration {
+    current.saturating_mul(2).min(CODEX_MAX_POLL_INTERVAL)
 }
 
 fn emit_codex_blocks(app: &AppHandle, session_id: &str, blocks: Vec<Block>) {
@@ -555,5 +584,17 @@ mod tests {
         assert_eq!(cursor2, cursor);
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_next_poll_interval_doubles_until_cap() {
+        let first = next_poll_interval(CODEX_BASE_POLL_INTERVAL);
+        assert_eq!(first, Duration::from_millis(3000));
+
+        let second = next_poll_interval(first);
+        assert_eq!(second, Duration::from_millis(6000));
+
+        let capped = next_poll_interval(Duration::from_millis(9000));
+        assert_eq!(capped, CODEX_MAX_POLL_INTERVAL);
     }
 }

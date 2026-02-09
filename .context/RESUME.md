@@ -9,8 +9,8 @@
 
 | Field | Value |
 |-------|-------|
-| **Phase** | 1 — Proxy Core (COMPLETE) |
-| **Status** | COMPLETE — Phase 1 delivered + provider modularity follow-up pass complete |
+| **Phase** | 1.5 — Stability & Modularity Hardening (COMPLETE) |
+| **Status** | COMPLETE — Hardening pass complete, foundation ready for Phase 2 |
 | **Last Updated** | 2026-02-09 |
 | **Blocking Issues** | None |
 | **Next Step** | Begin Phase 2: Context Engine |
@@ -52,6 +52,7 @@ Focus:
 | 0 | UI Foundation | ✅ COMPLETE | Tauri + Svelte 5 shell, 20 components, full visual UI with mock data, theme customizer |
 | 0.5 | Foundation Hardening | ✅ COMPLETE | Composable extraction, component subdirs, performance fixes, backend scaffolding, documentation |
 | 1 | Proxy Core | ✅ COMPLETE | HTTP intercept, request/response capture, event bridge, hot patch wiring |
+| 1.5 | Stability & Modularity Hardening | ✅ COMPLETE | Provider contracts, launch parity, codex bridge efficiency, bundle hardening |
 | 2 | Context Engine | PENDING | Block/session engine, persistence, deterministic policy/action log foundation |
 | 3 | Dynamic Compression | PENDING | Multi-level compression, preview, queue contract, preserve-keys |
 | 4 | Heat & Clustering | PENDING | Usage heat, relevance, topic clusters, dedup, dynamic rebalancing |
@@ -64,7 +65,7 @@ Focus:
 | 11 | System Prompts & Git | PENDING | Prompt composition, A/B testing, git integration, adaptive learning, advanced versioning UX |
 | 12 | Plugins & Ecosystem | PENDING | Plugin system, API, community, multi-agent (deferred) |
 
-**Phase docs**: `.context/phases/phase-{N}.md` — All 13 phases documented
+**Phase docs**: `.context/phases/phase-{N}.md` — Includes Phase 1.5 hardening checkpoint
 
 ### Roadmap Sync Notes (2026-02-08)
 
@@ -1161,7 +1162,7 @@ make test-ui     # Frontend tests
 
 ---
 
-### 2026-02-09: Provider Modularity Follow-up Complete
+### 2026-02-09: Phase 1.5 — Stability & Modularity Hardening Complete
 
 **Completed:**
 - [x] Provider adapter contract extracted for frontend launch/lifecycle/capabilities (`src/lib/utils/providerAdapters.ts`)

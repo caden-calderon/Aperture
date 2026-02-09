@@ -2,12 +2,12 @@
 
 **Status**: PENDING
 **Goal**: Core engine for block/session management, persistence, classification, and policy-safe context actions
-**Prerequisites**: Phase 1 complete
+**Prerequisites**: Phase 1 + Phase 1.5 complete
 **Estimated Scope**: ~55k context
 
 ---
 
-## Context from Phase 1
+## Context from Phase 1 + Phase 1.5
 
 Phase 1 delivers:
 - Proxy that intercepts and forwards API calls
@@ -15,6 +15,12 @@ Phase 1 delivers:
 - Event bridge for real-time UI updates
 - Provider auto-detection (Anthropic vs OpenAI)
 - Pause/hold mode for request inspection
+
+Phase 1.5 hardening adds:
+- Provider adapter boundaries for launch/parser/capabilities
+- Manual/quick-launch lifecycle convergence for Claude/Codex paths
+- Codex direct bridge polling hardening and instrumentation
+- Frontend build chunking guardrails for future growth
 
 **Key imports:**
 ```rust
