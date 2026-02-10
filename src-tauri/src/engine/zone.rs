@@ -14,11 +14,16 @@ use super::types::{BuiltInZone, Role, Zone};
 pub struct ZoneConfig {
     /// Number of recent turns to keep in the recency zone.
     pub recency_window: u32,
+    /// Keep all non-system blocks in recency until this many turns are present.
+    pub middle_activation_turns: u32,
 }
 
 impl Default for ZoneConfig {
     fn default() -> Self {
-        Self { recency_window: 5 }
+        Self {
+            recency_window: 5,
+            middle_activation_turns: 8,
+        }
     }
 }
 
@@ -27,8 +32,9 @@ impl Default for ZoneConfig {
 /// Rules (in priority order):
 /// 1. If block is pinned, its zone is not changed (pin overrides)
 /// 2. System/thinking role → Primacy
-/// 3. Turn index within recency window → Recency
-/// 4. Everything else → Middle
+/// 3. Before middle activation threshold, all non-system blocks → Recency
+/// 4. Turn index within recency window → Recency
+/// 5. Everything else → Middle
 pub fn auto_assign_zone(block: &Block, total_turns: u32, config: &ZoneConfig) -> Zone {
     // Pinned blocks keep their current zone
     if block.pinned.is_some() {
@@ -38,6 +44,11 @@ pub fn auto_assign_zone(block: &Block, total_turns: u32, config: &ZoneConfig) ->
     // System prompts and thinking blocks → primacy
     if block.role == Role::System || block.role == Role::Thinking {
         return Zone::BuiltIn(BuiltInZone::Primacy);
+    }
+
+    // Keep simple two-zone behavior for smaller conversations.
+    if total_turns <= config.middle_activation_turns {
+        return Zone::BuiltIn(BuiltInZone::Recency);
     }
 
     // Recent turns → recency
@@ -146,7 +157,10 @@ mod tests {
 
     #[test]
     fn test_recent_turns_go_to_recency() {
-        let config = ZoneConfig { recency_window: 3 };
+        let config = ZoneConfig {
+            recency_window: 3,
+            ..ZoneConfig::default()
+        };
         // Total turns = 10, recency window = 3 → turns 7,8,9 go to recency
         let block = make_block("b1", Role::User, 8);
         let zone = auto_assign_zone(&block, 10, &config);
@@ -155,7 +169,10 @@ mod tests {
 
     #[test]
     fn test_old_turns_go_to_middle() {
-        let config = ZoneConfig { recency_window: 3 };
+        let config = ZoneConfig {
+            recency_window: 3,
+            middle_activation_turns: 4,
+        };
         let block = make_block("b1", Role::User, 2);
         let zone = auto_assign_zone(&block, 10, &config);
         assert_eq!(zone, Zone::BuiltIn(BuiltInZone::Middle));
@@ -175,7 +192,10 @@ mod tests {
 
     #[test]
     fn test_assign_zones_batch() {
-        let config = ZoneConfig { recency_window: 2 };
+        let config = ZoneConfig {
+            recency_window: 2,
+            middle_activation_turns: 4,
+        };
         let mut blocks = vec![
             make_block("sys", Role::System, 0),
             make_block("u1", Role::User, 1),
@@ -191,6 +211,17 @@ mod tests {
         assert_eq!(blocks[2].zone, Zone::BuiltIn(BuiltInZone::Middle)); // turn 2
         assert_eq!(blocks[3].zone, Zone::BuiltIn(BuiltInZone::Recency)); // turn 3 (in window)
         assert_eq!(blocks[4].zone, Zone::BuiltIn(BuiltInZone::Recency)); // turn 4 (in window)
+    }
+
+    #[test]
+    fn test_before_middle_activation_all_non_system_are_recency() {
+        let config = ZoneConfig {
+            recency_window: 2,
+            middle_activation_turns: 8,
+        };
+        let block = make_block("b1", Role::Assistant, 1);
+        let zone = auto_assign_zone(&block, 4, &config);
+        assert_eq!(zone, Zone::BuiltIn(BuiltInZone::Recency));
     }
 
     #[test]
@@ -213,7 +244,10 @@ mod tests {
 
     #[test]
     fn test_all_blocks_in_recency_with_small_window() {
-        let config = ZoneConfig { recency_window: 10 };
+        let config = ZoneConfig {
+            recency_window: 10,
+            ..ZoneConfig::default()
+        };
         // Only 3 turns total, window=10 → all non-system go to recency
         let block = make_block("b1", Role::User, 1);
         let zone = auto_assign_zone(&block, 3, &config);

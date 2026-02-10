@@ -126,6 +126,23 @@ impl ContextEngine {
         // Ensure/get session
         let session_id = self.ensure_session(provider, model, source, thread_id);
 
+        // Response parsers currently emit turn_index=0 for assistant/tool output.
+        // Normalize response turns so latest response content is classified and
+        // ordered after the latest request turn in this exchange.
+        if !request_blocks.is_empty() && !response_blocks.is_empty() {
+            let next_turn = request_blocks
+                .iter()
+                .map(|b| b.metadata.turn_index)
+                .max()
+                .unwrap_or(0)
+                .saturating_add(1);
+
+            for block in &mut response_blocks {
+                block.metadata.turn_index = next_turn;
+                block.last_referenced_turn = next_turn;
+            }
+        }
+
         // Recount tokens accurately
         for block in request_blocks.iter_mut().chain(response_blocks.iter_mut()) {
             block.tokens = count_tokens(&block.content, model);
@@ -959,6 +976,47 @@ mod tests {
             tokens_after_first + session2.total_tokens
         );
         assert_eq!(session2.exchange_count, 2);
+    }
+
+    #[test]
+    fn test_ingest_normalizes_response_turn_to_latest_request_turn() {
+        let engine = ContextEngine::new_in_memory(None);
+
+        let request_blocks = vec![
+            make_block_with_turn("u0", Role::User, "turn 0", 0),
+            make_block_with_turn("a0", Role::Assistant, "turn 1", 1),
+            make_block_with_turn("u1", Role::User, "turn 2", 2),
+            make_block_with_turn("a1", Role::Assistant, "turn 3", 3),
+            make_block_with_turn("u2", Role::User, "turn 4", 4),
+            make_block_with_turn("a2", Role::Assistant, "turn 5", 5),
+        ];
+        // Response parsers emit turn_index=0; ingest should normalize this to latest+1.
+        let response_blocks = vec![make_block_with_turn(
+            "latest-assistant",
+            Role::Assistant,
+            "newest reply",
+            0,
+        )];
+
+        engine.ingest(
+            "anthropic",
+            "claude-sonnet",
+            "proxy",
+            None,
+            request_blocks,
+            response_blocks,
+        );
+
+        let latest = engine.block("latest-assistant").expect("response block exists");
+        assert_eq!(
+            latest.metadata.turn_index, 6,
+            "Response block should be shifted to latest request turn + 1"
+        );
+        assert_eq!(
+            latest.zone,
+            Zone::BuiltIn(BuiltInZone::Recency),
+            "Newest response must stay in recency"
+        );
     }
 
     #[test]

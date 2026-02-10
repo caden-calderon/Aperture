@@ -2,6 +2,21 @@
 
 ## Stabilization + Cleanup Pass (2026-02-10)
 
+### Post-Stabilization Threading + Zone Correctness (2026-02-10, Session 12)
+- [x] Fixed response turn-index normalization at ingest so parsed response blocks are assigned to latest request turn + 1 (prevents newest replies from being mis-zoned into middle when conversations get long).
+- [x] Refined zone policy with a middle-activation threshold:
+  - all non-system blocks stay in recency until conversation reaches threshold turns
+  - after threshold, recency window and middle split applies
+- [x] Extracted frontend thread-line grouping into dedicated utility and made grouping turn-aware to prevent visually connecting unrelated blocks.
+- [x] Added regression coverage:
+  - Rust ingest test for response turn normalization + recency placement
+  - Rust zone tests for activation-threshold behavior
+  - Frontend thread grouping tests for turn gaps, role boundaries, and tool chains
+- [x] Validation green: `make check`, `npm run build`.
+
+### Remaining Risk / Follow-up
+- [ ] Middle-activation and recency-window defaults (`8`/`5`) are policy defaults; may need tuning based on real-world long sessions and user preference controls.
+
 ### Completed
 - [x] Removed deprecated direct Codex mutation command surface (`codex_direct_apply_content_edit`) and associated backend-only helper path in `src-tauri/src/terminal/`.
 - [x] Consolidated frontend context mutation model to a single supported mode (`proxy_mutable`) and removed stale read-only branching/badge styling.

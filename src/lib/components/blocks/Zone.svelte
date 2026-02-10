@@ -2,6 +2,7 @@
   import type { Block, Zone as ZoneType } from "$lib/types";
   import { contextStore, zonesStore } from "$lib/stores";
   import { slide } from "svelte/transition";
+  import { computeThreadPositions } from "$lib/utils/threading";
   import ContextBlock from "./ContextBlock.svelte";
   import Sparkline from "./Sparkline.svelte";
 
@@ -90,50 +91,9 @@
   let selectedInZone = $derived(blocks.filter((b) => selectedIds.has(b.id)));
   let tokenHistory = $derived(zonesStore.getTokenHistory(zone));
 
-  // Thread grouping: group consecutive blocks into conversation threads.
-  // A thread starts at a "user" block and includes all following non-user blocks.
-  // Returns a map of block ID → thread position for rendering the vertical line.
-  type ThreadPos = 'first' | 'middle' | 'last';
-  const threadPositions = $derived.by(() => {
-    const positions = new Map<string, ThreadPos>();
-    // Build thread groups
-    const groups: number[][] = [];
-    let currentGroup: number[] = [];
-
-    for (let i = 0; i < blocks.length; i++) {
-      const current = blocks[i];
-      const next = i < blocks.length - 1 ? blocks[i + 1] : null;
-
-      currentGroup.push(i);
-
-      // Check if next block continues the thread
-      const continues = next && (
-        (current.role === "user" && (next.role === "assistant" || next.role === "tool_use" || next.role === "tool_result")) ||
-        (current.role === "assistant" && (next.role === "tool_use" || next.role === "tool_result" || next.role === "assistant")) ||
-        (current.role === "tool_use" && (next.role === "tool_result" || next.role === "tool_use")) ||
-        (current.role === "tool_result" && (next.role === "tool_use" || next.role === "assistant"))
-      );
-
-      if (!continues) {
-        if (currentGroup.length > 1) {
-          groups.push(currentGroup);
-        }
-        currentGroup = [];
-      }
-    }
-
-    // Assign positions
-    for (const group of groups) {
-      for (let j = 0; j < group.length; j++) {
-        const idx = group[j];
-        if (j === 0) positions.set(blocks[idx].id, 'first');
-        else if (j === group.length - 1) positions.set(blocks[idx].id, 'last');
-        else positions.set(blocks[idx].id, 'middle');
-      }
-    }
-
-    return positions;
-  });
+  // Thread lines are computed from role transitions plus turn continuity,
+  // so unrelated blocks in the same zone don't get visually connected.
+  const threadPositions = $derived.by(() => computeThreadPositions(blocks));
 
   function formatTokens(n: number): string {
     if (n >= 1000) return (n / 1000).toFixed(1) + "k";

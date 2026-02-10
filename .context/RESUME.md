@@ -10,7 +10,7 @@
 | Field | Value |
 |-------|-------|
 | **Phase** | 2 — Context Engine (Cleanup Pass Done) |
-| **Status** | STABILIZATION COMPLETE — Architecture cleanup + regression hardening done, 253 tests passing |
+| **Status** | STABILIZATION COMPLETE — Architecture cleanup + regression hardening done, 258 tests passing |
 | **Last Updated** | 2026-02-10 |
 | **Blocking Issues** | None |
 | **Next Step** | Sign off Phase 2, begin Phase 3 (Dynamic Compression) |
@@ -18,6 +18,27 @@
 ---
 
 ## Active Handoff (2026-02-10)
+
+### Phase 2 Post-Stabilization Corrections (Session 12 — COMPLETE)
+
+**What was done:**
+- Fixed a turn-index normalization gap in engine ingest: response parser output (`turn_index=0`) is now normalized to latest request turn + 1 during ingest so newest assistant/tool blocks are classified in the expected recency window.
+- Refined zone auto-assignment policy:
+  - non-system blocks remain in `recency` until a configurable activation threshold (`middle_activation_turns`, default `8`) is reached
+  - after activation, recency window policy (`recency_window`, default `5`) determines `recency` vs `middle`
+- Fixed thread-line rendering false joins by extracting grouping logic into a dedicated utility with turn-continuity + role-transition checks, preventing unrelated blocks in the same zone from appearing as a single thread.
+- Added regressions:
+  - Rust: response-turn normalization + recency placement
+  - Rust: threshold-driven zone behavior
+  - Frontend: thread grouping boundaries (turn gaps, system/thinking separators, assistant->user break, tool chain continuity)
+
+**Validation:**
+- `make check` ✅
+- `npm run build` ✅
+- Total passing tests: **258**
+
+**Remaining risks:**
+- Threshold defaults (`middle_activation_turns=8`, `recency_window=5`) are pragmatic but may need exposure/tuning after longer real-world conversations.
 
 ### Phase 2 Stabilization + Cleanup (Session 11 — COMPLETE)
 
