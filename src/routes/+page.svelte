@@ -227,11 +227,7 @@
       {/if}
       <span
         class="mode-badge"
-        class:mode-badge-direct={terminalStore.contextMutationMode.startsWith("direct")}
-        class:mode-badge-readonly={terminalStore.contextMutationMode === "direct_read_only"}
-        title={terminalStore.contextMutationMode === "direct_read_only"
-          ? "Codex launched independently — observe only. Relaunch from terminal for full control."
-          : "Proxy mode — full context control (edit, compress, reorder blocks)."}
+        title="Proxy mode — full context control (edit, compress, reorder blocks)."
       >
         {terminalStore.contextModeLabel}
       </span>
@@ -755,18 +751,6 @@
     border-radius: 999px;
     padding: 3px 8px;
     white-space: nowrap;
-  }
-
-  .mode-badge.mode-badge-direct {
-    color: var(--semantic-info);
-    border-color: color-mix(in srgb, var(--semantic-info) 55%, transparent);
-    background: color-mix(in srgb, var(--semantic-info) 14%, transparent);
-  }
-
-  .mode-badge.mode-badge-readonly {
-    color: var(--semantic-warning);
-    border-color: color-mix(in srgb, var(--semantic-warning) 55%, transparent);
-    background: color-mix(in srgb, var(--semantic-warning) 14%, transparent);
   }
 
   /* Buttons */

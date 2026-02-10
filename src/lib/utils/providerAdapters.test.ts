@@ -54,7 +54,6 @@ describe("provider adapters", () => {
   });
 
   it("formats mode badge labels", () => {
-    expect(contextModeBadgeLabel("direct_read_only")).toBe("Direct (Observe Only)");
-    expect(contextModeBadgeLabel("proxy_mutable")).toBe("Proxy (Full Control)");
+    expect(contextModeBadgeLabel("proxy_mutable")).toBe("Proxy (Mutable)");
   });
 });

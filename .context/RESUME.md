@@ -10,16 +10,49 @@
 | Field | Value |
 |-------|-------|
 | **Phase** | 2 — Context Engine (Cleanup Pass Done) |
-| **Status** | CLEANUP COMPLETE — Review + refactor done, 251 tests passing, ready for sign-off |
+| **Status** | STABILIZATION COMPLETE — Architecture cleanup + regression hardening done, 253 tests passing |
 | **Last Updated** | 2026-02-10 |
 | **Blocking Issues** | None |
 | **Next Step** | Sign off Phase 2, begin Phase 3 (Dynamic Compression) |
 
 ---
 
-## Active Handoff (2026-02-09)
+## Active Handoff (2026-02-10)
 
-### Phase 2 Cleanup & Refactor (Session 10 — NEXT)
+### Phase 2 Stabilization + Cleanup (Session 11 — COMPLETE)
+
+**What was done:**
+- Removed deprecated direct Codex mutation command surface:
+  - deleted Tauri command `codex_direct_apply_content_edit`
+  - removed unused direct-mutation helpers/tests from `terminal/codex_bridge.rs`
+- Consolidated mutation model to a single supported path:
+  - `openai` launch path is proxy-backed and `proxy_mutable`
+  - removed stale frontend read-only mode branches and conflicting badge states
+- Hardened proxy transport boundaries:
+  - added explicit request/response hop-by-hop header stripping helpers
+  - expanded request stripping to respect `Connection`-nominated headers
+  - kept response forwarding transport-safe by removing hop-by-hop framing headers
+- Strengthened zstd + routing regression coverage:
+  - zstd passthrough without edits
+  - zstd edit path forwards decompressed patched body and strips `content-encoding`
+  - routing matrix checks:
+    - non-`sk` bearer + `/responses` routes to ChatGPT codex backend
+    - non-`sk` bearer + `/v1/chat/completions` remains on standard OpenAI route
+  - regression test for “remember number -> edit -> next turn uses edited context”
+- Updated provider capability docs for unified `openai` proxy transport.
+
+**Validation:**
+- `make check` ✅
+- `npm run build` ✅
+- Rust tests: 221 (202 unit + 17 proxy integration + 2 engine session)
+- Frontend tests: 32
+- Total passing tests: **253**
+
+**Remaining risks:**
+- ChatGPT subscription backend behavior can still shift outside local proxy control (auth/header/cookie expectations).
+- Background/off-thread SQLite persistence remains future work for heavy IO loads.
+
+### Phase 2 Cleanup & Refactor (Session 10 — Historical Context)
 
 **Context:** Phase 2 is functionally complete and live-validated with both Codex (gpt-5.3-codex via ChatGPT subscription) and Claude Code (Opus 4.6). All success criteria met, 248 tests passing. But the phase spanned 9 sessions with a lot of trial-and-error, so the code needs a cleanup pass before sign-off.
 

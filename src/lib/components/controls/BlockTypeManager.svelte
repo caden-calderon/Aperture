@@ -86,10 +86,6 @@
     const label = blockTypesStore.getTypeById(typeId)?.label ?? typeId;
 
     if (selectionStore.hasSelection) {
-      if (contextStore.isReadOnlyMode) {
-        uiStore.showToast(contextStore.mutationBlockedReason, "warning");
-        return;
-      }
       // Assign selected blocks to this display type
       contextStore.setBlocksType([...selectionStore.selectedIds], typeId);
       const count = selectionStore.count;

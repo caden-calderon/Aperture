@@ -1,5 +1,28 @@
 # Provider Modularity Tasks - 2026-02-09
 
+## Stabilization + Cleanup Pass (2026-02-10)
+
+### Completed
+- [x] Removed deprecated direct Codex mutation command surface (`codex_direct_apply_content_edit`) and associated backend-only helper path in `src-tauri/src/terminal/`.
+- [x] Consolidated frontend context mutation model to a single supported mode (`proxy_mutable`) and removed stale read-only branching/badge styling.
+- [x] Kept provider-specific behavior at transport/parser boundaries: routing/mutation stays in proxy; engine/store remain provider-neutral.
+- [x] Refactored proxy header handling with explicit hop-by-hop stripping helpers for requests/responses, including `Connection` token expansion.
+- [x] Tightened zstd handling and coverage:
+  - no-edit path keeps compressed passthrough
+  - patched path forwards decompressed JSON and strips `content-encoding`
+- [x] Added/updated regression coverage:
+  - request hop-by-hop stripping
+  - response hop-by-hop stripping
+  - non-`sk` bearer + `/responses` ChatGPT codex routing
+  - non-`sk` bearer + `/v1/chat/completions` stays on standard OpenAI route
+  - “remember number -> edit -> next turn still uses edited value” hot-patch persistence
+- [x] Updated provider capability doc to reflect unified `openai` proxy model.
+- [x] Validation green: `make check`, `npm run build`.
+
+### Remaining Risk / Follow-up
+- [ ] ChatGPT subscription backend behavior still depends on upstream compatibility details outside local proxy control (header/cookie/auth semantics may evolve).
+- [ ] Background/off-thread persistence for heavy SQLite IO remains open for future phase work.
+
 ## Next Session Checklist
 
 ## Architecture

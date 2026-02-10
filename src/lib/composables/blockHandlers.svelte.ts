@@ -28,12 +28,6 @@ export function createBlockHandlers(stores: BlockHandlerStores) {
     return reason && reason.trim().length > 0 ? reason : fallback;
   }
 
-  function ensureContextEditable(): boolean {
-    if (!contextStore.isReadOnlyMode) return true;
-    uiStore.showToast(contextStore.mutationBlockedReason, "warning");
-    return false;
-  }
-
   // Context menu state
   let contextMenuBlock = $state<string | null>(null);
   let contextMenuX = $state(0);
@@ -90,14 +84,12 @@ export function createBlockHandlers(stores: BlockHandlerStores) {
   }
 
   function handleZoneReorder(zone: ZoneType, blockIds: string[], insertIndex: number) {
-    if (!ensureContextEditable()) return;
     contextStore.reorderBlocksInZone(zone, blockIds, insertIndex);
     const count = blockIds.length;
     uiStore.showToast(`Reordered ${count > 1 ? `${count} blocks` : 'block'}`, "info");
   }
 
   function handleCreateBlock(zone: ZoneType, typeId: string) {
-    if (!ensureContextEditable()) return;
     // Create a new block with the specified type
     const blockTypeInfo = blockTypesStore.getTypeById(typeId);
     const label = blockTypeInfo?.label ?? typeId;

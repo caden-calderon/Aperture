@@ -1,8 +1,5 @@
 export type LaunchProviderId = 'anthropic' | 'openai';
-export type ContextMutationMode = 'proxy_mutable' | 'direct_read_only';
-
-export const DIRECT_MODE_EDIT_BLOCK_REASON =
-  'Codex was launched independently (not through Aperture). Relaunch from the terminal panel for full context control.';
+export type ContextMutationMode = 'proxy_mutable';
 
 export interface ProviderCapabilities {
   supportsUsage: boolean;
@@ -15,7 +12,7 @@ export interface ProviderAdapter {
   label: string;
   quickLaunchLabel: string;
   command: string;
-  transport: 'proxy' | 'direct_cli_bridge';
+  transport: 'proxy';
   startsCodexBridge: boolean;
   startupMarkers: readonly string[];
   capabilities: ProviderCapabilities;
@@ -92,15 +89,11 @@ export function formatProviderCapabilities(capabilities: ProviderCapabilities): 
 }
 
 export function contextMutationModeForProvider(
-  provider: LaunchProviderId | 'none'
+  _provider: LaunchProviderId | 'none'
 ): ContextMutationMode {
-  if (provider === 'none') return 'proxy_mutable';
-  return getProviderAdapter(provider).transport === 'proxy'
-    ? 'proxy_mutable'
-    : 'direct_read_only';
+  return 'proxy_mutable';
 }
 
-export function contextModeBadgeLabel(mode: ContextMutationMode): string {
-  if (mode === 'direct_read_only') return 'Direct (Observe Only)';
-  return 'Proxy (Full Control)';
+export function contextModeBadgeLabel(_mode: ContextMutationMode): string {
+  return 'Proxy (Mutable)';
 }

@@ -23,12 +23,6 @@ export function createModalHandlers(stores: ModalHandlerStores) {
     return reason && reason.trim().length > 0 ? reason : fallback;
   }
 
-  function ensureContextEditable(): boolean {
-    if (!contextStore.isReadOnlyMode) return true;
-    uiStore.showToast(contextStore.mutationBlockedReason, "warning");
-    return false;
-  }
-
   function handleModalClose() {
     uiStore.closeModal();
   }
@@ -85,7 +79,6 @@ export function createModalHandlers(stores: ModalHandlerStores) {
 
   function handleModalRoleChange(role: Block["role"], blockType?: string) {
     if (uiStore.modalBlockId) {
-      if (!ensureContextEditable()) return;
       contextStore.setBlockRole(uiStore.modalBlockId, role, blockType);
       const label = blockType
         ? blockTypesStore.getTypeById(blockType)?.label ?? blockType

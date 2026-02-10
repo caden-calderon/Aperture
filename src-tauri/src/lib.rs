@@ -367,7 +367,6 @@ pub fn run() {
             terminal::start_codex_subscription_bridge,
             terminal::stop_codex_subscription_bridge,
             terminal::is_codex_subscription_bridge_running,
-            terminal::codex_direct_apply_content_edit,
             terminal::send_input,
             terminal::resize_terminal,
             terminal::kill_session,

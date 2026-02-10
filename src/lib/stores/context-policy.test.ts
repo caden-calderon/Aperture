@@ -129,20 +129,29 @@ describe("context store engine policy gating", () => {
     expect(contextStore.blocks.length).toBe(0);
   });
 
-  it("blocks content edits in direct read-only mode before engine IPC", async () => {
+  it("keeps edits mutable under unified proxy mode", async () => {
     const block = contextStore.blocks[0];
     expect(block).toBeDefined();
     if (!block) return;
 
-    contextStore.setContextMutationMode("direct_read_only");
-    const result = await contextStore.updateBlockContent(block.id, `${block.content} updated`);
+    contextStore.setContextMutationMode("proxy_mutable");
+    invokeMock
+      .mockResolvedValueOnce(JSON.stringify({ decision: "allow" }))
+      .mockResolvedValueOnce(undefined);
+    const updatedContent = `${block.content} updated`;
+    const result = await contextStore.updateBlockContent(block.id, updatedContent);
 
-    expect(result.applied).toBe(false);
-    expect(result.decision).toBe("deny");
-    expect(result.reason).toContain("launched independently");
-    expect(invokeMock).not.toHaveBeenCalled();
+    expect(result.applied).toBe(true);
+    expect(invokeMock).toHaveBeenCalledWith(
+      "queue_hot_patch",
+      expect.objectContaining({
+        role: block.role,
+        originalContent: block.content,
+        newContent: updatedContent,
+      })
+    );
     expect(contextStore.blocks.find((candidate) => candidate.id === block.id)?.content).toBe(
-      block.content
+      updatedContent
     );
   });
 

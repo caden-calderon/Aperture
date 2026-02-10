@@ -17,7 +17,6 @@ import { editHistoryStore } from "./editHistory.svelte";
 import { zonesStore } from "./zones.svelte";
 import { invoke } from "@tauri-apps/api/core";
 import {
-  DIRECT_MODE_EDIT_BLOCK_REASON,
   type ContextMutationMode,
 } from "../utils/providerAdapters";
 
@@ -219,14 +218,6 @@ function notFoundOutcome(message = "Block not found"): MutationOutcome {
   return { applied: false, decision: "not_found", reason: message, affected: 0 };
 }
 
-function readOnlyModeOutcome(): MutationOutcome {
-  return blockedOutcome("deny", DIRECT_MODE_EDIT_BLOCK_REASON);
-}
-
-function ensureMutableContext(): MutationOutcome | null {
-  return contextMutationMode === "direct_read_only" ? readOnlyModeOutcome() : null;
-}
-
 function parsePolicyDecision(raw: unknown): EnginePolicyResult | null {
   const parsed =
     typeof raw === "string"
@@ -400,8 +391,6 @@ async function moveBlock(blockId: string, targetZone: Zone): Promise<MutationOut
 
   const oldZone = blocks[index].zone;
   if (oldZone === targetZone) return appliedOutcome(0);
-  const modeGuard = ensureMutableContext();
-  if (modeGuard) return modeGuard;
 
   const permission = await ensureMutationAllowed("engine_move_block", {
     blockId,
@@ -424,8 +413,6 @@ async function moveBlocks(blockIds: string[], targetZone: Zone): Promise<Mutatio
     .filter((b) => idSet.has(b.id) && b.zone !== targetZone)
     .map((b) => b.id);
   if (movableIds.length === 0) return appliedOutcome(0);
-  const modeGuard = ensureMutableContext();
-  if (modeGuard) return modeGuard;
   const movableSet = new Set(movableIds);
 
   const permission = await ensureMutationAllowed("engine_bulk_move", {
@@ -452,8 +439,6 @@ async function moveBlocks(blockIds: string[], targetZone: Zone): Promise<Mutatio
 async function removeBlock(blockId: string): Promise<MutationOutcome> {
   const index = getBlockIndex(blockId);
   if (index === -1) return notFoundOutcome();
-  const modeGuard = ensureMutableContext();
-  if (modeGuard) return modeGuard;
 
   const permission = await ensureMutationAllowed("engine_remove_block", { blockId });
   if (!permission.applied) return permission;
@@ -468,8 +453,6 @@ async function removeBlocks(blockIds: string[]): Promise<MutationOutcome> {
   const idSet = new Set(blockIds);
   const existingIds = blocks.filter((b) => idSet.has(b.id)).map((b) => b.id);
   if (existingIds.length === 0) return notFoundOutcome();
-  const modeGuard = ensureMutableContext();
-  if (modeGuard) return modeGuard;
 
   const permission = await ensureMutationAllowed("engine_bulk_remove", {
     blockIds: existingIds,
@@ -524,8 +507,6 @@ async function updateBlockContent(blockId: string, content: string): Promise<Mut
   const block = blocks[index];
   const oldContent = block.content;
   if (oldContent === content) return appliedOutcome(0);
-  const modeGuard = ensureMutableContext();
-  if (modeGuard) return modeGuard;
 
   const permission = await ensureMutationAllowed("engine_update_content", {
     blockId,
@@ -536,18 +517,15 @@ async function updateBlockContent(blockId: string, content: string): Promise<Mut
 
   editHistoryStore.recordEdit(blockId, "content", { content: oldContent }, { content });
 
-  // Proxy mode uses hot patches for outbound request rewriting.
-  // Both Claude and Codex traffic flows through the proxy, so hot patches
-  // modify the messages/input array before forwarding to the upstream API.
-  if (contextMutationMode === "proxy_mutable") {
-    invoke("queue_hot_patch", {
-      role: block.role,
-      originalContent: oldContent,
-      newContent: content,
-    }).catch(() => {
-      // Ignore errors when running outside Tauri (e.g., browser dev)
-    });
-  }
+  // All supported transport paths are proxy-mutable, so content edits always
+  // queue a persistent hot patch for upstream rewrite on subsequent requests.
+  invoke("queue_hot_patch", {
+    role: block.role,
+    originalContent: oldContent,
+    newContent: content,
+  }).catch(() => {
+    // Ignore errors when running outside Tauri (e.g., browser dev)
+  });
   rememberLocalHotPatch(block.role, oldContent, content);
 
   const tokens = Math.ceil(content.length / 4);
@@ -694,8 +672,6 @@ async function setCompressionLevel(
   if (index === -1) return notFoundOutcome();
   const oldLevel = blocks[index].compressionLevel;
   if (oldLevel === level) return appliedOutcome(0);
-  const modeGuard = ensureMutableContext();
-  if (modeGuard) return modeGuard;
 
   const permission = await ensureMutationAllowed("engine_compress_block", { blockId, level });
   if (!permission.applied) return permission;
@@ -717,8 +693,6 @@ async function pinBlock(blockId: string, position: Block["pinned"]): Promise<Mut
   if (index === -1) return notFoundOutcome();
   const oldPin = blocks[index].pinned;
   if (oldPin === position) return appliedOutcome(0);
-  const modeGuard = ensureMutableContext();
-  if (modeGuard) return modeGuard;
 
   const permission = await ensureMutationAllowed("engine_pin_block", {
     blockId,
@@ -958,12 +932,6 @@ export const contextStore = {
   },
   get contextMutationMode() {
     return contextMutationMode;
-  },
-  get isReadOnlyMode() {
-    return contextMutationMode === "direct_read_only";
-  },
-  get mutationBlockedReason() {
-    return DIRECT_MODE_EDIT_BLOCK_REASON;
   },
 
   // Actions

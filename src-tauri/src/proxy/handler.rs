@@ -8,6 +8,7 @@ use axum::{
 };
 use bytes::Bytes;
 use futures_util::StreamExt;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -85,11 +86,21 @@ struct UpstreamRoute<'a> {
 /// Supports both `/v1/` prefixed and bare paths (e.g. Codex sends `/responses`).
 /// Detects ChatGPT subscription tokens (non-`sk-` Bearer) on Responses API paths
 /// and routes to the ChatGPT backend instead of the standard OpenAI API.
-fn determine_upstream<'a>(config: &'a UpstreamConfig, headers: &HeaderMap, path: &str) -> UpstreamRoute<'a> {
+fn determine_upstream<'a>(
+    config: &'a UpstreamConfig,
+    headers: &HeaderMap,
+    path: &str,
+) -> UpstreamRoute<'a> {
     use super::parser::{is_chat_completions_path, is_messages_path, is_responses_path};
 
-    let route = |url: &'a str| UpstreamRoute { url, is_chatgpt: false };
-    let chatgpt = |url: &'a str| UpstreamRoute { url, is_chatgpt: true };
+    let route = |url: &'a str| UpstreamRoute {
+        url,
+        is_chatgpt: false,
+    };
+    let chatgpt = |url: &'a str| UpstreamRoute {
+        url,
+        is_chatgpt: true,
+    };
 
     // Check for Anthropic-specific header
     if headers.contains_key("x-api-key") || headers.contains_key("anthropic-version") {
@@ -175,6 +186,79 @@ fn build_upstream_url(
     }
 }
 
+/// Fast path check: only known API endpoints need JSON parsing/capture transforms.
+fn is_supported_api_path(path: &str) -> bool {
+    use super::parser::{is_chat_completions_path, is_messages_path, is_responses_path};
+    is_messages_path(path) || is_chat_completions_path(path) || is_responses_path(path)
+}
+
+/// Parse `content-encoding` and detect whether zstd is present.
+fn has_zstd_content_encoding(headers: &HeaderMap) -> bool {
+    headers
+        .get_all(header::CONTENT_ENCODING)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .any(|encoding| encoding.eq_ignore_ascii_case(CONTENT_ENCODING_ZSTD))
+}
+
+/// Parse all Connection header values and collect nominated hop-by-hop header names.
+fn connection_header_tokens(headers: &HeaderMap) -> HashSet<header::HeaderName> {
+    headers
+        .get_all(header::CONNECTION)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .filter_map(|token| header::HeaderName::from_bytes(token.as_bytes()).ok())
+        .collect()
+}
+
+fn is_hop_by_hop_header(name: &header::HeaderName) -> bool {
+    matches!(
+        name.as_str(),
+        "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+            | "proxy-connection"
+    )
+}
+
+fn should_strip_request_header(
+    name: &header::HeaderName,
+    connection_tokens: &HashSet<header::HeaderName>,
+    body_was_patched: bool,
+) -> bool {
+    if connection_tokens.contains(name) {
+        return true;
+    }
+
+    if is_hop_by_hop_header(name) {
+        return true;
+    }
+
+    if name == header::HOST || name == header::CONTENT_LENGTH || name == header::ACCEPT_ENCODING {
+        return true;
+    }
+
+    body_was_patched && name == header::CONTENT_ENCODING
+}
+
+fn should_strip_response_header(name: &reqwest::header::HeaderName) -> bool {
+    if is_hop_by_hop_header(name) {
+        return true;
+    }
+
+    name == header::CONTENT_LENGTH
+}
+
 /// Dispatch events and feed engine after an exchange completes.
 fn finalize_exchange(
     state: &ProxyState,
@@ -228,9 +312,7 @@ fn handle_streaming_response(
             match chunk_result {
                 Ok(chunk) => {
                     chunk_count += 1;
-                    let bytes_received = state
-                        .capture
-                        .append_sse_chunk(&request_id, &chunk);
+                    let bytes_received = state.capture.append_sse_chunk(&request_id, &chunk);
                     total_bytes = bytes_received;
 
                     // Emit streaming progress (throttled — every 4KB)
@@ -361,6 +443,7 @@ async fn forward_request(
     let request_start = Instant::now();
     let pre_forward_start = Instant::now();
     let (parts, body) = req.into_parts();
+    let capture_supported = is_supported_api_path(path);
 
     // Read body for capture and forwarding
     let body_bytes = axum::body::to_bytes(body, MAX_BODY_SIZE)
@@ -380,14 +463,9 @@ async fn forward_request(
     // Codex CLI sends zstd-compressed request bodies — we need to decompress
     // for hot-patch matching and capture JSON parsing, but forward the original
     // compressed bytes when no patches are applied (transparent byte-passthrough).
-    let is_zstd = parts
-        .headers
-        .get(header::CONTENT_ENCODING)
-        .and_then(|v| v.to_str().ok())
-        .map(|ce| ce.contains(CONTENT_ENCODING_ZSTD))
-        .unwrap_or(false);
+    let is_zstd = has_zstd_content_encoding(&parts.headers);
 
-    let decompressed_body = if is_zstd {
+    let decompressed_body = if is_zstd && capture_supported {
         match zstd::stream::decode_all(std::io::Cursor::new(&body_bytes)) {
             Ok(decoded) => {
                 debug!(
@@ -398,7 +476,9 @@ async fn forward_request(
                 Some(Bytes::from(decoded))
             }
             Err(e) => {
-                debug!("Failed to decompress zstd body ({e}), skipping hot-patch/capture parsing");
+                debug!(
+                    "Failed to decompress zstd body ({e}); forwarding original bytes and skipping JSON transform"
+                );
                 None
             }
         }
@@ -458,16 +538,24 @@ async fn forward_request(
 
     // Build upstream request, forwarding headers with hop-by-hop stripping.
     let mut upstream_req = state.client.request(parts.method, upstream_url);
+    let connection_tokens = connection_header_tokens(&parts.headers);
     for (key, value) in parts.headers.iter() {
-        if key == header::HOST
-            || key == header::CONTENT_LENGTH
-            || key == header::CONNECTION
-            || key == header::ACCEPT_ENCODING
-        {
-            continue;
-        }
-        if body_was_patched && key == header::CONTENT_ENCODING {
-            debug!("Stripping Content-Encoding header (body was decompressed for patching)");
+        if should_strip_request_header(key, &connection_tokens, body_was_patched) {
+            if body_was_patched && key == header::CONTENT_ENCODING {
+                debug!("Stripping Content-Encoding header (body was decompressed for patching)");
+            }
+            if connection_tokens.contains(key) {
+                debug!("Stripping Connection-nominated hop-by-hop header: {}", key);
+            }
+            if is_hop_by_hop_header(key) {
+                debug!("Stripping hop-by-hop request header: {}", key);
+            }
+            if key == header::ACCEPT_ENCODING {
+                debug!("Stripping Accept-Encoding request header for byte-stable proxying");
+            }
+            if key == header::HOST || key == header::CONTENT_LENGTH {
+                debug!("Stripping transport-specific request header: {}", key);
+            }
             continue;
         }
         upstream_req = upstream_req.header(key, value);
@@ -545,19 +633,13 @@ async fn forward_request(
 /// Convert reqwest response headers to axum headers, stripping hop-by-hop
 /// and proxy-unsafe headers that must NOT be forwarded.
 ///
-/// Critical: reqwest may auto-decompress the body (changing its size) while
-/// the original Content-Length header reflects the compressed size. Forwarding
-/// it would cause clients to see a Content-Length mismatch and disconnect.
-/// Similarly, Transfer-Encoding is between reqwest↔upstream; axum handles
-/// the outgoing Transfer-Encoding to the client separately.
+/// Content-Length and hop-by-hop transport headers belong to the immediate
+/// upstream connection only. Forwarding them across the proxy boundary can
+/// cause framing mismatches and stream instability.
 fn convert_headers(headers: &reqwest::header::HeaderMap) -> HeaderMap {
     let mut axum_headers = HeaderMap::new();
     for (key, value) in headers.iter() {
-        // Skip hop-by-hop and proxy-unsafe response headers
-        if key == header::CONTENT_LENGTH
-            || key == header::TRANSFER_ENCODING
-            || key == header::CONNECTION
-        {
+        if should_strip_response_header(key) {
             continue;
         }
         if let Ok(name) = axum::http::header::HeaderName::from_bytes(key.as_str().as_bytes()) {
@@ -793,8 +875,12 @@ mod tests {
 
     #[test]
     fn test_build_upstream_url_normalizes_bare_path_and_query() {
-        let url =
-            build_upstream_url("https://api.openai.com", "/responses", Some("stream=true"), false);
+        let url = build_upstream_url(
+            "https://api.openai.com",
+            "/responses",
+            Some("stream=true"),
+            false,
+        );
         assert_eq!(url, "https://api.openai.com/v1/responses?stream=true");
     }
 
@@ -807,6 +893,79 @@ mod tests {
             true,
         );
         assert_eq!(url, "https://chatgpt.com/backend-api/codex/responses");
+    }
+
+    #[test]
+    fn test_connection_header_tokens_parses_nominated_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::CONNECTION,
+            "keep-alive, te, x-custom-hop".parse().unwrap(),
+        );
+
+        let tokens = connection_header_tokens(&headers);
+        assert!(tokens.contains(&header::HeaderName::from_static("keep-alive")));
+        assert!(tokens.contains(&header::HeaderName::from_static("te")));
+        assert!(tokens.contains(&header::HeaderName::from_static("x-custom-hop")));
+    }
+
+    #[test]
+    fn test_should_strip_request_header_covers_hop_by_hop_and_transport_headers() {
+        let connection_tokens = HashSet::from([header::HeaderName::from_static("x-forward-hop")]);
+
+        assert!(should_strip_request_header(
+            &header::CONNECTION,
+            &connection_tokens,
+            false
+        ));
+        assert!(should_strip_request_header(
+            &header::ACCEPT_ENCODING,
+            &connection_tokens,
+            false
+        ));
+        assert!(should_strip_request_header(
+            &header::HOST,
+            &connection_tokens,
+            false
+        ));
+        assert!(should_strip_request_header(
+            &header::HeaderName::from_static("x-forward-hop"),
+            &connection_tokens,
+            false
+        ));
+        assert!(should_strip_request_header(
+            &header::CONTENT_ENCODING,
+            &connection_tokens,
+            true
+        ));
+        assert!(!should_strip_request_header(
+            &header::CONTENT_TYPE,
+            &connection_tokens,
+            false
+        ));
+    }
+
+    #[test]
+    fn test_convert_headers_strips_hop_by_hop_response_headers() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(header::CONNECTION, "keep-alive".parse().unwrap());
+        headers.insert("keep-alive", "timeout=5".parse().unwrap());
+        headers.insert(header::TRANSFER_ENCODING, "chunked".parse().unwrap());
+        headers.insert(header::TE, "trailers".parse().unwrap());
+        headers.insert(header::UPGRADE, "websocket".parse().unwrap());
+        headers.insert(header::TRAILER, "expires".parse().unwrap());
+        headers.insert(header::CONTENT_LENGTH, "123".parse().unwrap());
+        headers.insert("x-aperture-upstream", "ok".parse().unwrap());
+
+        let converted = convert_headers(&headers);
+        assert!(!converted.contains_key(header::CONNECTION));
+        assert!(!converted.contains_key("keep-alive"));
+        assert!(!converted.contains_key(header::TRANSFER_ENCODING));
+        assert!(!converted.contains_key(header::TE));
+        assert!(!converted.contains_key(header::UPGRADE));
+        assert!(!converted.contains_key(header::TRAILER));
+        assert!(!converted.contains_key(header::CONTENT_LENGTH));
+        assert_eq!(converted.get("x-aperture-upstream").unwrap(), "ok");
     }
 
     // --- zstd decompression round-trip ---
@@ -823,11 +982,13 @@ mod tests {
 
         // Compress with zstd
         let compressed = zstd::stream::encode_all(std::io::Cursor::new(&json_bytes), 3).unwrap();
-        assert_ne!(compressed, json_bytes, "Compressed should differ from original");
+        assert_ne!(
+            compressed, json_bytes,
+            "Compressed should differ from original"
+        );
 
         // Decompress
-        let decompressed =
-            zstd::stream::decode_all(std::io::Cursor::new(&compressed)).unwrap();
+        let decompressed = zstd::stream::decode_all(std::io::Cursor::new(&compressed)).unwrap();
         assert_eq!(decompressed, json_bytes, "Round-trip should match original");
 
         // Verify JSON parses correctly
@@ -839,34 +1000,26 @@ mod tests {
     fn test_zstd_content_encoding_detection() {
         let mut headers = HeaderMap::new();
         assert!(
-            !headers
-                .get(header::CONTENT_ENCODING)
-                .and_then(|v| v.to_str().ok())
-                .map(|ce| ce.contains(CONTENT_ENCODING_ZSTD))
-                .unwrap_or(false),
+            !has_zstd_content_encoding(&headers),
             "No content-encoding header should not detect zstd"
         );
 
         headers.insert(header::CONTENT_ENCODING, "zstd".parse().unwrap());
         assert!(
-            headers
-                .get(header::CONTENT_ENCODING)
-                .and_then(|v| v.to_str().ok())
-                .map(|ce| ce.contains(CONTENT_ENCODING_ZSTD))
-                .unwrap_or(false),
+            has_zstd_content_encoding(&headers),
             "Should detect zstd content-encoding"
         );
 
         // Also handle compound encodings like "zstd, identity"
         headers.insert(header::CONTENT_ENCODING, "zstd, identity".parse().unwrap());
         assert!(
-            headers
-                .get(header::CONTENT_ENCODING)
-                .and_then(|v| v.to_str().ok())
-                .map(|ce| ce.contains(CONTENT_ENCODING_ZSTD))
-                .unwrap_or(false),
+            has_zstd_content_encoding(&headers),
             "Should detect zstd in compound content-encoding"
         );
+
+        // Ensure tokenized matching is precise.
+        headers.insert(header::CONTENT_ENCODING, "gzip".parse().unwrap());
+        assert!(!has_zstd_content_encoding(&headers));
     }
 
     #[test]
@@ -895,13 +1048,14 @@ mod tests {
         );
 
         // Decompress then patch
-        let decompressed =
-            zstd::stream::decode_all(std::io::Cursor::new(&compressed)).unwrap();
+        let decompressed = zstd::stream::decode_all(std::io::Cursor::new(&compressed)).unwrap();
         let patched = hot_patch::apply_patches(&decompressed, &patches);
-        assert!(patched.is_some(), "Patches should apply to decompressed bytes");
+        assert!(
+            patched.is_some(),
+            "Patches should apply to decompressed bytes"
+        );
 
-        let patched_json: serde_json::Value =
-            serde_json::from_slice(&patched.unwrap()).unwrap();
+        let patched_json: serde_json::Value = serde_json::from_slice(&patched.unwrap()).unwrap();
         assert_eq!(patched_json["input"][0]["content"], "Patched via zstd");
     }
 }

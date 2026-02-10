@@ -12,20 +12,20 @@ describe("terminal context mode state", () => {
     terminalStore.setSelectedProvider("openai");
 
     expect(terminalStore.contextMutationMode).toBe("proxy_mutable");
-    expect(terminalStore.contextModeLabel).toBe("Proxy (Full Control)");
+    expect(terminalStore.contextModeLabel).toBe("Proxy (Mutable)");
   });
 
   it("reports proxy mutable mode for all providers and shell", () => {
     terminalStore.setSelectedProvider("anthropic");
     expect(terminalStore.contextMutationMode).toBe("proxy_mutable");
-    expect(terminalStore.contextModeLabel).toBe("Proxy (Full Control)");
+    expect(terminalStore.contextModeLabel).toBe("Proxy (Mutable)");
 
     terminalStore.setSelectedProvider("openai");
     expect(terminalStore.contextMutationMode).toBe("proxy_mutable");
-    expect(terminalStore.contextModeLabel).toBe("Proxy (Full Control)");
+    expect(terminalStore.contextModeLabel).toBe("Proxy (Mutable)");
 
     terminalStore.setSelectedProvider("none");
     expect(terminalStore.contextMutationMode).toBe("proxy_mutable");
-    expect(terminalStore.contextModeLabel).toBe("Proxy (Full Control)");
+    expect(terminalStore.contextModeLabel).toBe("Proxy (Mutable)");
   });
 });

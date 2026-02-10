@@ -328,22 +328,6 @@ pub fn is_codex_subscription_bridge_running(
     Ok(guard.is_some())
 }
 
-#[tauri::command]
-pub fn codex_direct_apply_content_edit(
-    role: String,
-    original_content: String,
-    new_content: String,
-    conversation_id: Option<String>,
-) -> Result<(), TerminalError> {
-    codex_bridge::apply_content_edit(
-        &role,
-        &original_content,
-        &new_content,
-        conversation_id.as_deref(),
-    )
-    .map_err(TerminalError::DirectEditFailed)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
