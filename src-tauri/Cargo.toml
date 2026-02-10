@@ -44,6 +44,12 @@ uuid = { version = "1", features = ["v4"] }
 # Concurrent collections
 dashmap = "6"
 
+# Request body decompression (Codex CLI sends zstd-compressed bodies)
+zstd = "0.13"
+
+# Persistence
+rusqlite = { version = "0.32", features = ["bundled"] }
+
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

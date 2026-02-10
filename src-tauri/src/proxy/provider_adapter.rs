@@ -234,7 +234,8 @@ mod tests {
 
     #[test]
     fn test_placeholder_adapters_exist_for_phase2_expansion() {
-        let ids: Vec<ProviderAdapterId> = builtin_parser_adapters().iter().map(|a| a.id()).collect();
+        let ids: Vec<ProviderAdapterId> =
+            builtin_parser_adapters().iter().map(|a| a.id()).collect();
         assert!(ids.contains(&ProviderAdapterId::GeminiCli));
         assert!(ids.contains(&ProviderAdapterId::OpenCode));
         assert!(ids.contains(&ProviderAdapterId::KiloCode));
@@ -248,4 +249,3 @@ mod tests {
         assert!(caps.supports_resume_id);
     }
 }
-

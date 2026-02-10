@@ -55,8 +55,7 @@
 
   const providerLabel: Record<TerminalProvider, string> = {
     anthropic: launchAdapters.find((a) => a.id === 'anthropic')?.label ?? 'Claude',
-    openai: launchAdapters.find((a) => a.id === 'openai')?.label ?? 'Codex Direct',
-    openai_proxy: launchAdapters.find((a) => a.id === 'openai_proxy')?.label ?? 'Codex Proxy',
+    openai: launchAdapters.find((a) => a.id === 'openai')?.label ?? 'Codex',
     none: 'Shell',
   };
 

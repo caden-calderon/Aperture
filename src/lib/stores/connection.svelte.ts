@@ -9,7 +9,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { Block } from "../types";
+import type { BlocksCapturedPayload } from "../utils/blockConvert";
 
 // ============================================================================
 // Types
@@ -23,49 +23,6 @@ export interface StreamingState {
   requestId: string;
   bytesReceived: number;
   provider: ProxyProvider;
-}
-
-/** Payload from the Rust ApertureEvent::BlocksCaptured variant. */
-export interface BlocksCapturedPayload {
-  type: "blocks_captured";
-  request_id: string;
-  provider: string;
-  model: string;
-  request_blocks: RustBlock[];
-  response_blocks: RustBlock[];
-  input_tokens: number | null;
-  output_tokens: number | null;
-}
-
-/** Rust Block struct — snake_case fields from serde. */
-interface RustBlock {
-  id: string;
-  role: string;
-  block_type: string | null;
-  content: string;
-  tokens: number;
-  timestamp: string;
-  zone: string | { BuiltIn: string } | { Custom: string };
-  pinned: string | null;
-  compression_level: string;
-  compressed_versions: {
-    original: { content: string; tokens: number };
-    trimmed?: { content: string; tokens: number };
-    summarized?: { content: string; tokens: number };
-    minimal?: { content: string; tokens: number };
-  };
-  usage_heat: number;
-  position_relevance: number;
-  last_referenced_turn: number;
-  reference_count: number;
-  topic_cluster: string | null;
-  topic_keywords: string[];
-  metadata: {
-    provider: string;
-    turn_index: number;
-    tool_name: string | null;
-    file_paths: string[];
-  };
 }
 
 // ============================================================================
@@ -91,53 +48,10 @@ let unlistenFns: UnlistenFn[] = [];
 let healthCheckInterval: ReturnType<typeof setInterval> | undefined;
 let idleCheckInterval: ReturnType<typeof setInterval> | undefined;
 
-// Callback for blocks received (set by context store)
-let onBlocksCaptured: ((requestBlocks: Block[], responseBlocks: Block[]) => void) | null = null;
+// Callback for when the engine has finished processing (context_updated event)
+let onContextUpdatedCb: (() => void) | null = null;
 // Callback for session reset (when client disconnects and a new session starts)
 let onSessionReset: (() => void) | null = null;
-
-// ============================================================================
-// Rust Block → TypeScript Block conversion
-// ============================================================================
-
-function convertZone(zone: RustBlock["zone"]): string {
-  if (typeof zone === "string") return zone;
-  if ("BuiltIn" in zone) return (zone.BuiltIn as string).toLowerCase();
-  if ("Custom" in zone) return zone.Custom;
-  return "recency";
-}
-
-function convertBlock(rb: RustBlock): Block {
-  return {
-    id: rb.id,
-    role: rb.role as Block["role"],
-    blockType: rb.block_type ?? undefined,
-    content: rb.content,
-    tokens: rb.tokens,
-    timestamp: new Date(rb.timestamp),
-    zone: convertZone(rb.zone),
-    pinned: (rb.pinned as Block["pinned"]) ?? null,
-    compressionLevel: rb.compression_level as Block["compressionLevel"],
-    compressedVersions: {
-      original: rb.compressed_versions.original,
-      trimmed: rb.compressed_versions.trimmed,
-      summarized: rb.compressed_versions.summarized,
-      minimal: rb.compressed_versions.minimal,
-    },
-    usageHeat: rb.usage_heat,
-    positionRelevance: rb.position_relevance,
-    lastReferencedTurn: rb.last_referenced_turn,
-    referenceCount: rb.reference_count,
-    topicCluster: rb.topic_cluster,
-    topicKeywords: rb.topic_keywords,
-    metadata: {
-      provider: rb.metadata.provider,
-      turnIndex: rb.metadata.turn_index,
-      toolName: rb.metadata.tool_name ?? undefined,
-      filePaths: rb.metadata.file_paths,
-    },
-  };
-}
 
 // ============================================================================
 // Activity tracking
@@ -261,14 +175,12 @@ async function subscribeToEvents(): Promise<void> {
         activeModel = data.model;
         activeProvider = (data.provider as ProxyProvider) ?? "unknown";
         markActive();
+        break;
+      }
 
-        // Convert Rust blocks to TypeScript blocks
-        const requestBlocks = data.request_blocks.map(convertBlock);
-        const responseBlocks = data.response_blocks.map(convertBlock);
-
-        if (onBlocksCaptured) {
-          onBlocksCaptured(requestBlocks, responseBlocks);
-        }
+      case "context_updated": {
+        markActive();
+        if (onContextUpdatedCb) onContextUpdatedCb();
         break;
       }
 
@@ -390,9 +302,9 @@ export const connectionStore = {
   clearSession,
   refreshHotPatchCount,
 
-  /** Register a callback for when blocks are captured from the proxy. */
-  onBlocksCaptured(cb: (requestBlocks: Block[], responseBlocks: Block[]) => void): void {
-    onBlocksCaptured = cb;
+  /** Register a callback for when the engine has finished processing blocks. */
+  onContextUpdated(cb: () => void): void {
+    onContextUpdatedCb = cb;
   },
 
   /** Register a callback for when a session is cleared/reset. */

@@ -24,6 +24,16 @@ interface BlockHandlerStores {
 export function createBlockHandlers(stores: BlockHandlerStores) {
   const { selectionStore, uiStore, contextStore, zonesStore, blockTypesStore } = stores;
 
+  function blockedReason(reason: string | undefined, fallback = "Action blocked by policy"): string {
+    return reason && reason.trim().length > 0 ? reason : fallback;
+  }
+
+  function ensureContextEditable(): boolean {
+    if (!contextStore.isReadOnlyMode) return true;
+    uiStore.showToast(contextStore.mutationBlockedReason, "warning");
+    return false;
+  }
+
   // Context menu state
   let contextMenuBlock = $state<string | null>(null);
   let contextMenuX = $state(0);
@@ -63,22 +73,31 @@ export function createBlockHandlers(stores: BlockHandlerStores) {
     contextMenuBlock = null;
   }
 
-  function handleZoneDrop(zone: ZoneType, blockIds: string[]) {
-    for (const id of blockIds) {
-      contextStore.moveBlock(id, zone);
+  async function handleZoneDrop(zone: ZoneType, blockIds: string[]) {
+    const result = await contextStore.moveBlocks(blockIds, zone);
+    if (!result.applied) {
+      uiStore.showToast(blockedReason(result.reason), "warning");
+      return;
     }
-    const count = blockIds.length;
+
+    const count = result.affected;
     const zoneName = zonesStore.getZoneById(zone)?.label ?? zone;
-    uiStore.showToast(`Moved ${count > 1 ? `${count} blocks` : '1 block'} to ${zoneName}`, "info");
+    if (count === 0) {
+      uiStore.showToast(`No blocks moved to ${zoneName}`, "info");
+    } else {
+      uiStore.showToast(`Moved ${count > 1 ? `${count} blocks` : '1 block'} to ${zoneName}`, "info");
+    }
   }
 
   function handleZoneReorder(zone: ZoneType, blockIds: string[], insertIndex: number) {
+    if (!ensureContextEditable()) return;
     contextStore.reorderBlocksInZone(zone, blockIds, insertIndex);
     const count = blockIds.length;
     uiStore.showToast(`Reordered ${count > 1 ? `${count} blocks` : 'block'}`, "info");
   }
 
   function handleCreateBlock(zone: ZoneType, typeId: string) {
+    if (!ensureContextEditable()) return;
     // Create a new block with the specified type
     const blockTypeInfo = blockTypesStore.getTypeById(typeId);
     const label = blockTypeInfo?.label ?? typeId;
@@ -98,25 +117,37 @@ export function createBlockHandlers(stores: BlockHandlerStores) {
   }
 
   // Context menu action handlers
-  function handleContextMenuPin(pos: "top" | "bottom" | null) {
+  async function handleContextMenuPin(pos: "top" | "bottom" | null) {
     if (contextMenuBlock) {
-      contextStore.pinBlock(contextMenuBlock, pos);
+      const result = await contextStore.pinBlock(contextMenuBlock, pos);
+      if (!result.applied) {
+        uiStore.showToast(blockedReason(result.reason), 'warning');
+        return;
+      }
       const label = pos ? `Pinned to ${pos}` : 'Unpinned';
       uiStore.showToast(label, 'success');
     }
   }
 
-  function handleContextMenuMove(zone: ZoneType) {
+  async function handleContextMenuMove(zone: ZoneType) {
     if (contextMenuBlock) {
-      contextStore.moveBlock(contextMenuBlock, zone);
+      const result = await contextStore.moveBlock(contextMenuBlock, zone);
+      if (!result.applied) {
+        uiStore.showToast(blockedReason(result.reason), 'warning');
+        return;
+      }
       const zoneName = zonesStore.getZoneById(zone)?.label ?? zone;
       uiStore.showToast(`Moved to ${zoneName}`, 'info');
     }
   }
 
-  function handleContextMenuCompress(level: Block["compressionLevel"]) {
+  async function handleContextMenuCompress(level: Block["compressionLevel"]) {
     if (contextMenuBlock) {
-      contextStore.setCompressionLevel(contextMenuBlock, level);
+      const result = await contextStore.setCompressionLevel(contextMenuBlock, level);
+      if (!result.applied) {
+        uiStore.showToast(blockedReason(result.reason), 'warning');
+        return;
+      }
       uiStore.showToast(`Set to ${level}`, 'success');
     }
   }
@@ -131,9 +162,13 @@ export function createBlockHandlers(stores: BlockHandlerStores) {
     }
   }
 
-  function handleContextMenuRemove() {
+  async function handleContextMenuRemove() {
     if (contextMenuBlock) {
-      contextStore.removeBlock(contextMenuBlock);
+      const result = await contextStore.removeBlock(contextMenuBlock);
+      if (!result.applied) {
+        uiStore.showToast(blockedReason(result.reason), 'warning');
+        return;
+      }
       uiStore.showToast('Block removed', 'success');
     }
   }

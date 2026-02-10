@@ -19,45 +19,73 @@ interface ModalHandlerStores {
 export function createModalHandlers(stores: ModalHandlerStores) {
   const { uiStore, contextStore, blockTypesStore } = stores;
 
+  function blockedReason(reason: string | undefined, fallback = "Action blocked by policy"): string {
+    return reason && reason.trim().length > 0 ? reason : fallback;
+  }
+
+  function ensureContextEditable(): boolean {
+    if (!contextStore.isReadOnlyMode) return true;
+    uiStore.showToast(contextStore.mutationBlockedReason, "warning");
+    return false;
+  }
+
   function handleModalClose() {
     uiStore.closeModal();
   }
 
-  function handleModalCompress(level: Block["compressionLevel"]) {
+  async function handleModalCompress(level: Block["compressionLevel"]) {
     if (uiStore.modalBlockId) {
-      contextStore.setCompressionLevel(uiStore.modalBlockId, level);
+      const result = await contextStore.setCompressionLevel(uiStore.modalBlockId, level);
+      if (!result.applied) {
+        uiStore.showToast(blockedReason(result.reason), "warning");
+      }
     }
   }
 
-  function handleModalMove(zone: ZoneType) {
+  async function handleModalMove(zone: ZoneType) {
     if (uiStore.modalBlockId) {
-      contextStore.moveBlock(uiStore.modalBlockId, zone);
+      const result = await contextStore.moveBlock(uiStore.modalBlockId, zone);
+      if (!result.applied) {
+        uiStore.showToast(blockedReason(result.reason), "warning");
+      }
     }
   }
 
-  function handleModalPin(position: Block["pinned"]) {
+  async function handleModalPin(position: Block["pinned"]) {
     if (uiStore.modalBlockId) {
-      contextStore.pinBlock(uiStore.modalBlockId, position);
+      const result = await contextStore.pinBlock(uiStore.modalBlockId, position);
+      if (!result.applied) {
+        uiStore.showToast(blockedReason(result.reason), "warning");
+      }
     }
   }
 
-  function handleModalRemove() {
+  async function handleModalRemove() {
     if (uiStore.modalBlockId) {
-      contextStore.removeBlock(uiStore.modalBlockId);
+      const result = await contextStore.removeBlock(uiStore.modalBlockId);
+      if (!result.applied) {
+        uiStore.showToast(blockedReason(result.reason), "warning");
+        return;
+      }
       uiStore.closeModal();
       uiStore.showToast("Block removed", "success");
     }
   }
 
-  function handleModalContentEdit(content: string) {
+  async function handleModalContentEdit(content: string) {
     if (uiStore.modalBlockId) {
-      contextStore.updateBlockContent(uiStore.modalBlockId, content);
+      const result = await contextStore.updateBlockContent(uiStore.modalBlockId, content);
+      if (!result.applied) {
+        uiStore.showToast(blockedReason(result.reason), "warning");
+        return;
+      }
       uiStore.showToast("Content updated", "success");
     }
   }
 
   function handleModalRoleChange(role: Block["role"], blockType?: string) {
     if (uiStore.modalBlockId) {
+      if (!ensureContextEditable()) return;
       contextStore.setBlockRole(uiStore.modalBlockId, role, blockType);
       const label = blockType
         ? blockTypesStore.getTypeById(blockType)?.label ?? blockType

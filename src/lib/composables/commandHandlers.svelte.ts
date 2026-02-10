@@ -33,7 +33,11 @@ interface CommandCallbacks {
 export function createCommandHandlers(stores: CommandHandlerStores, refs: CommandHandlerRefs, callbacks: CommandCallbacks) {
   const { uiStore, selectionStore, contextStore, searchStore, terminalStore, zonesStore } = stores;
 
-  function handleCommand(command: string) {
+  function blockedReason(reason: string | undefined, fallback = "Action blocked by policy"): string {
+    return reason && reason.trim().length > 0 ? reason : fallback;
+  }
+
+  async function handleCommand(command: string) {
     switch (command) {
       // View
       case 'toggle-sidebar':
@@ -103,74 +107,118 @@ export function createCommandHandlers(stores: CommandHandlerStores, refs: Comman
       // Edit
       case 'remove-selected':
         if (selectionStore.hasSelection) {
-          const count = selectionStore.count;
-          contextStore.removeBlocks([...selectionStore.selectedIds]);
-          selectionStore.deselect();
-          uiStore.showToast(`Removed ${count} block(s)`, 'success');
+          const result = await contextStore.removeBlocks([...selectionStore.selectedIds]);
+          if (result.applied) {
+            selectionStore.deselect();
+            uiStore.showToast(`Removed ${result.affected} block(s)`, 'success');
+          } else {
+            uiStore.showToast(blockedReason(result.reason), 'warning');
+          }
         }
         break;
       case 'pin-selected-top':
         if (selectionStore.hasSelection) {
-          for (const id of selectionStore.selectedIds) {
-            contextStore.pinBlock(id, 'top');
+          const results = await Promise.all(
+            [...selectionStore.selectedIds].map((id) => contextStore.pinBlock(id, 'top'))
+          );
+          const applied = results.reduce((sum, result) => sum + result.affected, 0);
+          if (applied > 0) {
+            uiStore.showToast(`Pinned ${applied} block(s) to top`, 'success');
           }
-          uiStore.showToast(`Pinned ${selectionStore.count} block(s) to top`, 'success');
+          const blocked = results.find((result) => !result.applied);
+          if (blocked) {
+            uiStore.showToast(blockedReason(blocked.reason), 'warning');
+          }
         }
         break;
       case 'pin-selected-bottom':
         if (selectionStore.hasSelection) {
-          for (const id of selectionStore.selectedIds) {
-            contextStore.pinBlock(id, 'bottom');
+          const results = await Promise.all(
+            [...selectionStore.selectedIds].map((id) => contextStore.pinBlock(id, 'bottom'))
+          );
+          const applied = results.reduce((sum, result) => sum + result.affected, 0);
+          if (applied > 0) {
+            uiStore.showToast(`Pinned ${applied} block(s) to bottom`, 'success');
           }
-          uiStore.showToast(`Pinned ${selectionStore.count} block(s) to bottom`, 'success');
+          const blocked = results.find((result) => !result.applied);
+          if (blocked) {
+            uiStore.showToast(blockedReason(blocked.reason), 'warning');
+          }
         }
         break;
       case 'unpin-selected':
         if (selectionStore.hasSelection) {
-          for (const id of selectionStore.selectedIds) {
-            contextStore.pinBlock(id, null);
+          const results = await Promise.all(
+            [...selectionStore.selectedIds].map((id) => contextStore.pinBlock(id, null))
+          );
+          const applied = results.reduce((sum, result) => sum + result.affected, 0);
+          if (applied > 0) {
+            uiStore.showToast(`Unpinned ${applied} block(s)`, 'success');
           }
-          uiStore.showToast(`Unpinned ${selectionStore.count} block(s)`, 'success');
+          const blocked = results.find((result) => !result.applied);
+          if (blocked) {
+            uiStore.showToast(blockedReason(blocked.reason), 'warning');
+          }
         }
         break;
       case 'compress-selected-trimmed':
         if (selectionStore.hasSelection) {
-          for (const id of selectionStore.selectedIds) {
-            contextStore.setCompressionLevel(id, 'trimmed');
+          const results = await Promise.all(
+            [...selectionStore.selectedIds].map((id) => contextStore.setCompressionLevel(id, 'trimmed'))
+          );
+          const applied = results.reduce((sum, result) => sum + result.affected, 0);
+          if (applied > 0) {
+            uiStore.showToast(`Compressed ${applied} block(s) to trimmed`, 'success');
           }
-          uiStore.showToast(`Compressed ${selectionStore.count} block(s) to trimmed`, 'success');
+          const blocked = results.find((result) => !result.applied);
+          if (blocked) {
+            uiStore.showToast(blockedReason(blocked.reason), 'warning');
+          }
         }
         break;
       case 'compress-selected-summarized':
         if (selectionStore.hasSelection) {
-          for (const id of selectionStore.selectedIds) {
-            contextStore.setCompressionLevel(id, 'summarized');
+          const results = await Promise.all(
+            [...selectionStore.selectedIds].map((id) => contextStore.setCompressionLevel(id, 'summarized'))
+          );
+          const applied = results.reduce((sum, result) => sum + result.affected, 0);
+          if (applied > 0) {
+            uiStore.showToast(`Compressed ${applied} block(s) to summarized`, 'success');
           }
-          uiStore.showToast(`Compressed ${selectionStore.count} block(s) to summarized`, 'success');
+          const blocked = results.find((result) => !result.applied);
+          if (blocked) {
+            uiStore.showToast(blockedReason(blocked.reason), 'warning');
+          }
         }
         break;
       case 'move-selected-primacy':
         if (selectionStore.hasSelection) {
-          for (const id of selectionStore.selectedIds) {
-            contextStore.moveBlock(id, 'primacy');
+          const result = await contextStore.moveBlocks([...selectionStore.selectedIds], 'primacy');
+          if (result.applied) {
+            uiStore.showToast(`Moved ${result.affected} block(s) to Primacy`, 'success');
+          } else {
+            uiStore.showToast(blockedReason(result.reason), 'warning');
           }
-          uiStore.showToast(`Moved ${selectionStore.count} block(s) to Primacy`, 'success');
         }
         break;
       case 'move-selected-middle':
         if (selectionStore.hasSelection) {
-          for (const id of selectionStore.selectedIds) {
-            contextStore.moveBlock(id, 'middle');
+          const result = await contextStore.moveBlocks([...selectionStore.selectedIds], 'middle');
+          if (result.applied) {
+            uiStore.showToast(`Moved ${result.affected} block(s) to Middle`, 'success');
+          } else {
+            uiStore.showToast(blockedReason(result.reason), 'warning');
           }
-          uiStore.showToast(`Moved ${selectionStore.count} block(s) to Middle`, 'success');
         }
         break;
       case 'move-selected-recency':
         if (selectionStore.hasSelection) {
-          for (const id of selectionStore.selectedIds) {
-            contextStore.moveBlock(id, 'recency');
+          const result = await contextStore.moveBlocks([...selectionStore.selectedIds], 'recency');
+          if (result.applied) {
+            uiStore.showToast(`Moved ${result.affected} block(s) to Recency`, 'success');
+          } else {
+            uiStore.showToast(blockedReason(result.reason), 'warning');
           }
-          uiStore.showToast(`Moved ${selectionStore.count} block(s) to Recency`, 'success');
         }
         break;
 
@@ -207,9 +255,15 @@ export function createCommandHandlers(stores: CommandHandlerStores, refs: Comman
         uiStore.showToast('Demo data loaded', 'success');
         break;
       case 'clear-all-blocks':
-        contextStore.removeBlocks(contextStore.blocks.map(b => b.id));
-        selectionStore.deselect();
-        uiStore.showToast('All blocks cleared', 'success');
+        {
+          const result = await contextStore.removeBlocks(contextStore.blocks.map(b => b.id));
+          if (result.applied) {
+            selectionStore.deselect();
+            uiStore.showToast('All blocks cleared', 'success');
+          } else {
+            uiStore.showToast(blockedReason(result.reason), 'warning');
+          }
+        }
         break;
     }
   }

@@ -1,6 +1,6 @@
 # Phase 2: Context Engine
 
-**Status**: PENDING
+**Status**: IN PROGRESS
 **Goal**: Core engine for block/session management, persistence, classification, and policy-safe context actions
 **Prerequisites**: Phase 1 + Phase 1.5 complete
 **Estimated Scope**: ~55k context
@@ -284,22 +284,22 @@ Add a deterministic mutation layer used by later phases:
 
 ## Success Criteria
 
-- [ ] Blocks stored and retrievable by ID
-- [ ] Zones auto-assigned based on role and position
-- [ ] Manual pinning works and overrides auto-assignment
-- [ ] Token counts accurate within 2% of official API
-- [ ] Staleness scores calculated and displayed
-- [ ] Classification pipeline runs in <2ms
-- [ ] Multiple sessions tracked concurrently
-- [ ] Session switching works in UI
-- [ ] Basic block versioning with undo works
-- [ ] Deterministic dependency tracking detects file references
-- [ ] Budget alerts trigger at 80%, 90%, 95%
-- [ ] Policy checks gate destructive actions with logged reasons
-- [ ] `make check` passes
-- [ ] 50+ unit tests passing
-- [ ] 10+ integration tests passing
-- [ ] All manual tests documented and passing
+- [x] Blocks stored and retrievable by ID
+- [x] Zones auto-assigned based on role and position
+- [x] Manual pinning works and overrides auto-assignment
+- [x] Token counts accurate within 2% of official API
+- [x] Staleness scores calculated and displayed
+- [x] Classification pipeline runs in <2ms
+- [x] Multiple sessions tracked concurrently
+- [x] Session switching works in UI
+- [x] Basic block versioning with undo works
+- [x] Deterministic dependency tracking detects file references
+- [x] Budget alerts trigger at 80%, 90%, 95%
+- [x] Policy checks gate destructive actions with logged reasons
+- [x] `make check` passes (242 tests, clippy clean)
+- [x] 50+ unit tests passing (229: 197 Rust unit + 32 frontend)
+- [x] 10+ integration tests passing (14: 12 proxy + 2 engine session)
+- [x] All manual tests documented and passing
 
 ---
 

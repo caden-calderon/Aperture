@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  contextModeBadgeLabel,
+  contextMutationModeForProvider,
   formatProviderCapabilities,
   getProviderAdapter,
   inferManualLaunchProvider,
@@ -11,15 +13,15 @@ import {
 describe("provider adapters", () => {
   it("provides stable ordered launch adapters", () => {
     const adapters = listProviderAdapters();
-    expect(adapters.map((a) => a.id)).toEqual(["anthropic", "openai", "openai_proxy"]);
+    expect(adapters.map((a) => a.id)).toEqual(["anthropic", "openai"]);
   });
 
-  it("maps openai direct mode to bridge transport", () => {
+  it("maps openai to proxy transport with codex bridge", () => {
     const adapter = getProviderAdapter("openai");
     expect(adapter.command).toBe("codex");
-    expect(adapter.transport).toBe("direct_cli_bridge");
+    expect(adapter.transport).toBe("proxy");
     expect(adapter.startsCodexBridge).toBe(true);
-    expect(adapter.capabilities.supportsUsage).toBe(false);
+    expect(adapter.capabilities.supportsUsage).toBe(true);
   });
 
   it("only starts codex bridge for known startup markers", () => {
@@ -43,5 +45,16 @@ describe("provider adapters", () => {
         supportsResumeId: true,
       })
     ).toBe("usage · no-reasoning · resume-id");
+  });
+
+  it("maps all providers to proxy mutable context mode", () => {
+    expect(contextMutationModeForProvider("openai")).toBe("proxy_mutable");
+    expect(contextMutationModeForProvider("anthropic")).toBe("proxy_mutable");
+    expect(contextMutationModeForProvider("none")).toBe("proxy_mutable");
+  });
+
+  it("formats mode badge labels", () => {
+    expect(contextModeBadgeLabel("direct_read_only")).toBe("Direct (Observe Only)");
+    expect(contextModeBadgeLabel("proxy_mutable")).toBe("Proxy (Full Control)");
   });
 });

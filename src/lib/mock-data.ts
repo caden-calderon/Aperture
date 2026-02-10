@@ -609,10 +609,10 @@ export function generateDemoSnapshots(_currentBlocks: Block[]): Snapshot[] {
   return [];
 }
 
-export function calculateTokenBudget(blocks: Block[]): TokenBudget {
+export function calculateTokenBudget(blocks: Block[], limit = 200_000): TokenBudget {
   const budget: TokenBudget = {
     used: 0,
-    limit: 200000,
+    limit,
     byZone: { primacy: 0, middle: 0, recency: 0 }, // Initialize built-in zones
     byRole: {
       system: 0,

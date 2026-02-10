@@ -30,6 +30,10 @@ interface KeyboardHandlerRefs {
 export function createKeyboardHandlers(stores: KeyboardHandlerStores, refs: KeyboardHandlerRefs) {
   const { selectionStore, uiStore, contextStore, searchStore, terminalStore, zonesStore } = stores;
 
+  function blockedReason(reason: string | undefined, fallback = "Action blocked by policy"): string {
+    return reason && reason.trim().length > 0 ? reason : fallback;
+  }
+
   // Flat ordered list of all visible blocks (zone display order)
   const allBlocksFlat = $derived(
     zonesStore.zonesByDisplayOrder.flatMap(z => contextStore.blocksByZone[z.id] ?? [])
@@ -57,7 +61,7 @@ export function createKeyboardHandlers(stores: KeyboardHandlerStores, refs: Keyb
   }
 
   // Keyboard shortcuts
-  function handleKeydown(e: KeyboardEvent) {
+  async function handleKeydown(e: KeyboardEvent) {
     // Ctrl+T toggles terminal, even from inputs
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "t") {
       e.preventDefault();
@@ -120,10 +124,13 @@ export function createKeyboardHandlers(stores: KeyboardHandlerStores, refs: Keyb
       case "backspace":
         if (selectionStore.hasSelection) {
           e.preventDefault();
-          const count = selectionStore.count;
-          contextStore.removeBlocks([...selectionStore.selectedIds]);
-          selectionStore.deselect();
-          uiStore.showToast(`Removed ${count} block(s)`, "success");
+          const result = await contextStore.removeBlocks([...selectionStore.selectedIds]);
+          if (result.applied) {
+            selectionStore.deselect();
+            uiStore.showToast(`Removed ${result.affected} block(s)`, "success");
+          } else {
+            uiStore.showToast(blockedReason(result.reason), "warning");
+          }
         }
         break;
       case "s":

@@ -6,7 +6,12 @@
 // Types
 // ============================================================================
 
-import type { LaunchProviderId } from "$lib/utils/providerAdapters";
+import {
+  contextModeBadgeLabel,
+  contextMutationModeForProvider,
+  type ContextMutationMode,
+  type LaunchProviderId,
+} from "$lib/utils/providerAdapters";
 
 export type TerminalPosition = 'bottom' | 'right';
 export type TerminalProvider = LaunchProviderId | 'none';
@@ -199,6 +204,12 @@ export const terminalStore = {
   get collapsedSize() { return COLLAPSED_SIZE; },
   get selectedProvider() { return selectedProvider; },
   get launchStatus() { return launchStatus; },
+  get contextMutationMode(): ContextMutationMode {
+    return contextMutationModeForProvider(selectedProvider);
+  },
+  get contextModeLabel(): string {
+    return contextModeBadgeLabel(contextMutationModeForProvider(selectedProvider));
+  },
 
   init,
   show,

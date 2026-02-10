@@ -59,14 +59,12 @@ fn provider_env_plan(provider: &str, port: u16) -> EnvPlan {
             env.insert("ANTHROPIC_BASE_URL".into(), base);
             clear.extend(OPENAI_PROXY_ENV_KEYS.iter().map(|k| (*k).to_string()));
         }
-        // Direct ChatGPT/Codex mode: do not force OpenAI API base.
-        // Also clear inherited proxy vars so this mode is deterministic.
+        // Route Codex/OpenAI traffic through proxy for full context control.
+        // Codex CLI sends full conversation on every HTTP request (stateless),
+        // so the proxy can hot-patch, compress, and reorder blocks.
+        // Note: ChatGPT OAuth subscription auth may need upstream routing
+        // adjustment if it targets chatgpt.com instead of api.openai.com.
         "openai" => {
-            env.insert("ANTHROPIC_BASE_URL".into(), base);
-            clear.extend(OPENAI_PROXY_ENV_KEYS.iter().map(|k| (*k).to_string()));
-        }
-        "openai_proxy" => {
-            // Explicit API/proxy mode for OpenAI-compatible tools.
             env.insert("ANTHROPIC_BASE_URL".into(), base.clone());
             env.insert("OPENAI_BASE_URL".into(), base.clone());
             env.insert("OPENAI_API_BASE".into(), base);
@@ -80,9 +78,10 @@ fn provider_env_plan(provider: &str, port: u16) -> EnvPlan {
 /// Build default proxy env for interactive shells so manual `claude`/`codex`
 /// commands typed by the user are routed through Aperture.
 fn default_proxy_env_plan(port: u16) -> EnvPlan {
-    // Keep Claude proxied by default. Do NOT force OPENAI_BASE_URL globally,
-    // otherwise Codex ChatGPT subscription mode is coerced into API auth mode.
-    provider_env_plan("anthropic", port)
+    // Route both Claude and Codex through the proxy by default.
+    // Codex CLI sends full conversation on every HTTP request, so the proxy
+    // gets full context control (hot-patch, compress, reorder).
+    provider_env_plan("openai", port)
 }
 
 /// Spawn a PTY shell, optionally injecting extra environment variables.
@@ -284,6 +283,7 @@ pub fn kill_session(
 pub fn start_codex_subscription_bridge(
     app: AppHandle,
     state: State<'_, TerminalState>,
+    engine: State<'_, std::sync::Arc<crate::engine::ContextEngine>>,
 ) -> Result<bool, TerminalError> {
     let mut guard = state
         .codex_bridge
@@ -294,14 +294,17 @@ pub fn start_codex_subscription_bridge(
         return Ok(false);
     }
 
-    let handle =
-        codex_bridge::spawn(app).map_err(|e| TerminalError::SpawnFailed(e.to_string()))?;
+    let engine_arc = (*engine).clone();
+    let handle = codex_bridge::spawn(app, engine_arc)
+        .map_err(|e| TerminalError::SpawnFailed(e.to_string()))?;
     *guard = Some(handle);
     Ok(true)
 }
 
 #[tauri::command]
-pub fn stop_codex_subscription_bridge(state: State<'_, TerminalState>) -> Result<bool, TerminalError> {
+pub fn stop_codex_subscription_bridge(
+    state: State<'_, TerminalState>,
+) -> Result<bool, TerminalError> {
     let mut guard = state
         .codex_bridge
         .lock()
@@ -326,6 +329,22 @@ pub fn is_codex_subscription_bridge_running(
     Ok(guard.is_some())
 }
 
+#[tauri::command]
+pub fn codex_direct_apply_content_edit(
+    role: String,
+    original_content: String,
+    new_content: String,
+    conversation_id: Option<String>,
+) -> Result<(), TerminalError> {
+    codex_bridge::apply_content_edit(
+        &role,
+        &original_content,
+        &new_content,
+        conversation_id.as_deref(),
+    )
+    .map_err(TerminalError::DirectEditFailed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -347,20 +366,6 @@ mod tests {
     #[test]
     fn test_provider_env_vars_openai() {
         let env = provider_env_plan("openai", 5400);
-        assert!(!env.set.contains_key("OPENAI_BASE_URL"));
-        assert_eq!(
-            env.set.get("ANTHROPIC_BASE_URL").unwrap(),
-            "http://localhost:5400"
-        );
-        assert_eq!(
-            env.clear,
-            vec!["OPENAI_BASE_URL".to_string(), "OPENAI_API_BASE".to_string()]
-        );
-    }
-
-    #[test]
-    fn test_provider_env_vars_openai_proxy() {
-        let env = provider_env_plan("openai_proxy", 5400);
         assert_eq!(
             env.set.get("OPENAI_BASE_URL").unwrap(),
             "http://localhost:5400"
@@ -399,10 +404,13 @@ mod tests {
             env.set.get("ANTHROPIC_BASE_URL").unwrap(),
             "http://localhost:5400"
         );
-        assert!(!env.set.contains_key("OPENAI_BASE_URL"));
         assert_eq!(
-            env.clear,
-            vec!["OPENAI_BASE_URL".to_string(), "OPENAI_API_BASE".to_string()]
+            env.set.get("OPENAI_BASE_URL").unwrap(),
+            "http://localhost:5400"
+        );
+        assert_eq!(
+            env.set.get("OPENAI_API_BASE").unwrap(),
+            "http://localhost:5400"
         );
     }
 

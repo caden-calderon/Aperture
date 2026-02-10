@@ -10,7 +10,12 @@ use aperture_lib::proxy::handler::proxy_handler;
 use aperture_lib::proxy::hot_patch::{HotPatch, HotPatchQueue, PatchSource};
 use aperture_lib::proxy::{ProxyState, UpstreamConfig};
 use axum::{
-    extract::OriginalUri, http::StatusCode, response::IntoResponse, routing::post, Json, Router,
+    body::Bytes,
+    extract::OriginalUri,
+    http::StatusCode,
+    response::IntoResponse,
+    routing::post,
+    Json, Router,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -121,6 +126,7 @@ async fn start_test_proxy(
     let config = UpstreamConfig {
         anthropic_url: upstream_url.to_string(),
         openai_url: upstream_url.to_string(),
+        chatgpt_codex_url: upstream_url.to_string(),
     };
 
     let mut state = ProxyState::with_config(config).unwrap();
@@ -264,11 +270,13 @@ async fn test_hot_patch_modifies_forwarded_request() {
         "Hot patch should have modified the request. Body: {body}"
     );
 
-    // Queue should be drained after application
+    // Patches are persistent (re-apply on every request) until explicitly cleared
     assert!(
-        queue.is_empty(),
-        "Queue should be empty after applying patches"
+        !queue.is_empty(),
+        "Patches should persist after application"
     );
+    queue.clear();
+    assert!(queue.is_empty(), "Queue should be empty after clear()");
 
     // Captured blocks should reflect the patched content (not pre-patch)
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -322,7 +330,9 @@ async fn test_hot_patch_no_match_passes_through_unchanged() {
         "Original content should pass through"
     );
 
-    // Queue should still be drained
+    // Patches persist until explicitly cleared (even if no match)
+    assert!(!queue.is_empty());
+    queue.clear();
     assert!(queue.is_empty());
 }
 
@@ -355,9 +365,11 @@ async fn test_openai_bare_responses_path_forwards_and_captures() {
     let (proxy_port, state) = start_test_proxy(&upstream_url, None).await;
 
     let client = reqwest::Client::new();
+    // Use sk- token so the request routes to standard OpenAI (not ChatGPT)
+    // and the bare /responses path gets /v1/ normalization.
     let response = client
         .post(format!("http://127.0.0.1:{proxy_port}/responses"))
-        .header("authorization", "Bearer session-token-xyz")
+        .header("authorization", "Bearer sk-test-key-xyz")
         .header("content-type", "application/json")
         .json(&serde_json::json!({
             "model": "gpt-4.1",
@@ -391,11 +403,13 @@ async fn test_openai_bare_responses_streaming_preserves_query() {
     let (proxy_port, _) = start_test_proxy(&upstream_url, None).await;
 
     let client = reqwest::Client::new();
+    // Use sk- token so the request routes to standard OpenAI (not ChatGPT)
+    // and the bare /responses path gets /v1/ normalization.
     let response = client
         .post(format!(
             "http://127.0.0.1:{proxy_port}/responses?trace=1&stream=true"
         ))
-        .header("authorization", "Bearer non-sk-token")
+        .header("authorization", "Bearer sk-test-streaming")
         .header("content-type", "application/json")
         .json(&serde_json::json!({
             "model": "gpt-4.1",
@@ -418,6 +432,440 @@ async fn test_openai_bare_responses_streaming_preserves_query() {
 
     let body = response.text().await.unwrap();
     assert!(body.contains("data: [DONE]"));
+}
+
+/// Verify that hot patches apply to Responses API `input` array (not just `messages`).
+#[tokio::test]
+async fn test_hot_patch_applies_to_responses_api_input() {
+    let (upstream_url, _) = start_mock_upstream().await;
+    let queue = Arc::new(HotPatchQueue::new());
+
+    queue.enqueue(HotPatch {
+        role: "user".to_string(),
+        original_content: "Hello from codex".to_string(),
+        new_content: "Patched from codex".to_string(),
+        source: PatchSource::Manual,
+    });
+
+    let (proxy_port, state) = start_test_proxy(&upstream_url, Some(queue.clone())).await;
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("http://127.0.0.1:{proxy_port}/responses"))
+        .header("authorization", "Bearer sk-test-key")
+        .header("content-type", "application/json")
+        .json(&serde_json::json!({
+            "model": "gpt-4.1",
+            "input": [
+                { "type": "message", "role": "user", "content": "Hello from codex" }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert!(response.status().is_success());
+
+    // The mock echoes back request body — patched content should appear
+    let body = response.text().await.unwrap();
+    assert!(
+        body.contains("Echo from responses"),
+        "Should get a valid response from /responses endpoint"
+    );
+
+    // Captured blocks should reflect the patched content
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let blocks = state.capture.all_blocks();
+    let user_block = blocks
+        .iter()
+        .find(|b| b.content.contains("Patched from codex") || b.content.contains("codex"));
+    assert!(
+        user_block.is_some(),
+        "Should have captured user block from /responses input. Blocks: {:?}",
+        blocks.iter().map(|b| &b.content).collect::<Vec<_>>()
+    );
+}
+
+/// Verify hot patches work through SSE streaming on the Responses API path.
+#[tokio::test]
+async fn test_hot_patch_with_streaming_responses_api() {
+    let (upstream_url, _) = start_mock_upstream().await;
+    let queue = Arc::new(HotPatchQueue::new());
+
+    queue.enqueue(HotPatch {
+        role: "user".to_string(),
+        original_content: "stream test".to_string(),
+        new_content: "patched stream test".to_string(),
+        source: PatchSource::Manual,
+    });
+
+    let (proxy_port, state) = start_test_proxy(&upstream_url, Some(queue.clone())).await;
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("http://127.0.0.1:{proxy_port}/responses"))
+        .header("authorization", "Bearer sk-test-key")
+        .header("content-type", "application/json")
+        .json(&serde_json::json!({
+            "model": "gpt-4.1",
+            "stream": true,
+            "input": "stream test"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Streaming response should contain SSE data
+    let body = response.text().await.unwrap();
+    assert!(
+        body.contains("data: [DONE]"),
+        "SSE stream should complete with [DONE]"
+    );
+
+    // Wait for capture finalization
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // Patches should persist after streaming
+    assert!(
+        !queue.is_empty(),
+        "Patches should persist after streaming request"
+    );
+
+    // Verify capture recorded something for the request
+    let blocks = state.capture.all_blocks();
+    assert!(
+        !blocks.is_empty(),
+        "Should have captured blocks from streaming response"
+    );
+}
+
+/// Verify that ChatGPT subscription tokens route correctly and
+/// the mock responds successfully through the proxy.
+#[tokio::test]
+async fn test_chatgpt_subscription_routing_with_sse() {
+    // Start mock upstream with a ChatGPT-style /responses endpoint
+    let app = Router::new().route(
+        "/responses",
+        post(|Json(body): Json<serde_json::Value>| async move {
+            let stream = body
+                .get("stream")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            if stream {
+                let sse = concat!(
+                    "data: {\"model\":\"gpt-4.1\",\"choices\":[{\"delta\":{\"content\":\"Chat\"}}]}\n\n",
+                    "data: {\"model\":\"gpt-4.1\",\"choices\":[{\"delta\":{\"content\":\"GPT\"}}]}\n\n",
+                    "data: [DONE]\n\n",
+                );
+                return (
+                    StatusCode::OK,
+                    [("content-type", "text/event-stream")],
+                    sse,
+                )
+                    .into_response();
+            }
+
+            Json(serde_json::json!({
+                "id": "resp_chatgpt",
+                "model": "gpt-4.1",
+                "output": [{
+                    "type": "message",
+                    "content": [{ "type": "output_text", "text": "From ChatGPT backend" }]
+                }],
+                "usage": { "input_tokens": 10, "output_tokens": 5 }
+            }))
+            .into_response()
+        }),
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let chatgpt_port = listener.local_addr().unwrap().port();
+    let chatgpt_url = format!("http://127.0.0.1:{chatgpt_port}");
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Point chatgpt_codex_url at the mock (but leave the standard openai_url at a different mock)
+    let (standard_url, _) = start_mock_upstream().await;
+    let config = UpstreamConfig {
+        anthropic_url: standard_url.clone(),
+        openai_url: standard_url,
+        chatgpt_codex_url: chatgpt_url,
+    };
+
+    let state = ProxyState::with_config(config).unwrap();
+    let state = Arc::new(state);
+
+    let app = Router::new()
+        .route("/{*path}", axum::routing::any(proxy_handler))
+        .with_state(state.clone());
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_port = listener.local_addr().unwrap().port();
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let client = reqwest::Client::new();
+
+    // Non-streaming: subscription token (non-sk-) on /responses → ChatGPT backend
+    let response = client
+        .post(format!("http://127.0.0.1:{proxy_port}/responses"))
+        .header("authorization", "Bearer session-token-abc")
+        .header("content-type", "application/json")
+        .json(&serde_json::json!({
+            "model": "gpt-4.1",
+            "input": [
+                { "type": "message", "role": "user", "content": [{ "type": "text", "text": "Hello" }] }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert!(
+        response.status().is_success(),
+        "ChatGPT subscription routing should succeed, got {}",
+        response.status()
+    );
+
+    let body = response.text().await.unwrap();
+    assert!(
+        body.contains("From ChatGPT backend"),
+        "Response should come from ChatGPT mock, got: {body}"
+    );
+
+    // Streaming: subscription token on /responses with stream=true
+    let response = client
+        .post(format!("http://127.0.0.1:{proxy_port}/responses"))
+        .header("authorization", "Bearer session-token-abc")
+        .header("content-type", "application/json")
+        .json(&serde_json::json!({
+            "model": "gpt-4.1",
+            "stream": true,
+            "input": "streaming test"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.text().await.unwrap();
+    assert!(
+        body.contains("Chat") && body.contains("GPT"),
+        "SSE stream should contain ChatGPT mock content, got: {body}"
+    );
+    assert!(body.contains("data: [DONE]"), "SSE stream should complete");
+}
+
+/// Verify that zstd-compressed request bodies are decompressed for capture.
+///
+/// Codex CLI sends `content-encoding: zstd` compressed request bodies.
+/// The proxy must decompress them for block parsing/capture while forwarding
+/// the original compressed bytes to upstream (transparent byte-passthrough).
+#[tokio::test]
+async fn test_zstd_compressed_body_decompressed_for_capture() {
+    // Start a mock upstream that accepts raw bytes (not JSON) to test passthrough.
+    // The mock accepts POST with any body and returns a valid Responses API response.
+    let app = Router::new().route(
+        "/v1/responses",
+        post(|body: Bytes| async move {
+            // Try to parse as JSON — if the body is still compressed this will fail
+            let is_json = serde_json::from_slice::<serde_json::Value>(&body).is_ok();
+            Json(serde_json::json!({
+                "id": "resp_zstd_test",
+                "model": "gpt-4.1",
+                "body_was_valid_json": is_json,
+                "body_len": body.len(),
+                "output": [{
+                    "type": "message",
+                    "content": [{ "type": "output_text", "text": "zstd response" }]
+                }],
+                "usage": { "input_tokens": 10, "output_tokens": 5 }
+            }))
+        }),
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let upstream_url = format!("http://127.0.0.1:{port}");
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let (proxy_port, state) = start_test_proxy(&upstream_url, None).await;
+
+    // Build a valid Responses API JSON body and compress it with zstd.
+    // Responses API items require "type": "message" for the parser to extract blocks.
+    let json_body = serde_json::json!({
+        "model": "gpt-4.1",
+        "input": [
+            { "type": "message", "role": "user", "content": "Hello from zstd-compressed codex request" }
+        ]
+    });
+    let json_bytes = serde_json::to_vec(&json_body).unwrap();
+    let compressed = zstd::stream::encode_all(std::io::Cursor::new(&json_bytes), 3).unwrap();
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("http://127.0.0.1:{proxy_port}/v1/responses"))
+        .header("authorization", "Bearer sk-test-zstd")
+        .header("content-type", "application/json")
+        .header("content-encoding", "zstd")
+        .body(compressed.clone())
+        .send()
+        .await
+        .unwrap();
+
+    assert!(
+        response.status().is_success(),
+        "Proxy should forward zstd request successfully, got {}",
+        response.status()
+    );
+
+    let resp_body: serde_json::Value = response.json().await.unwrap();
+
+    // The upstream received the original compressed bytes (transparent passthrough)
+    // so it should NOT see valid JSON
+    assert_eq!(
+        resp_body["body_was_valid_json"], false,
+        "Upstream should receive compressed bytes (not decompressed) when no patches applied"
+    );
+
+    // But the capture should have decompressed and parsed the blocks
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let blocks = state.capture.all_blocks();
+
+    let user_block = blocks
+        .iter()
+        .find(|b| b.content.contains("zstd-compressed codex"));
+    assert!(
+        user_block.is_some(),
+        "Capture should have decompressed zstd body and extracted user block. Blocks: {:?}",
+        blocks.iter().map(|b| (&b.role, &b.content)).collect::<Vec<_>>()
+    );
+}
+
+/// Verify that hot patches apply to zstd-compressed request bodies AND
+/// the decompressed+patched body is forwarded (with content-encoding stripped).
+#[tokio::test]
+async fn test_zstd_body_hot_patch_sends_decompressed_patched_body() {
+    // Mock upstream that parses JSON and echoes it back
+    let app = Router::new().route(
+        "/v1/responses",
+        post(|body: Bytes| async move {
+            let parsed = serde_json::from_slice::<serde_json::Value>(&body);
+            match parsed {
+                Ok(json) => Json(serde_json::json!({
+                    "id": "resp_zstd_patch",
+                    "model": "gpt-4.1",
+                    "echoed_input": json.get("input").cloned(),
+                    "output": [{
+                        "type": "message",
+                        "content": [{ "type": "output_text", "text": "patched response" }]
+                    }],
+                    "usage": { "input_tokens": 10, "output_tokens": 5 }
+                }))
+                .into_response(),
+                Err(_) => (
+                    StatusCode::BAD_REQUEST,
+                    "Failed to parse JSON (body may still be compressed)",
+                )
+                    .into_response(),
+            }
+        }),
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let upstream_url = format!("http://127.0.0.1:{port}");
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let queue = Arc::new(HotPatchQueue::new());
+    queue.enqueue(HotPatch {
+        role: "user".to_string(),
+        original_content: "original zstd content".to_string(),
+        new_content: "patched zstd content".to_string(),
+        source: PatchSource::Manual,
+    });
+
+    let (proxy_port, state) = start_test_proxy(&upstream_url, Some(queue.clone())).await;
+
+    // Responses API items require "type": "message" for the parser to extract blocks.
+    let json_body = serde_json::json!({
+        "model": "gpt-4.1",
+        "input": [
+            { "type": "message", "role": "user", "content": "original zstd content here" }
+        ]
+    });
+    let json_bytes = serde_json::to_vec(&json_body).unwrap();
+    let compressed = zstd::stream::encode_all(std::io::Cursor::new(&json_bytes), 3).unwrap();
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("http://127.0.0.1:{proxy_port}/v1/responses"))
+        .header("authorization", "Bearer sk-test-zstd-patch")
+        .header("content-type", "application/json")
+        .header("content-encoding", "zstd")
+        .body(compressed)
+        .send()
+        .await
+        .unwrap();
+
+    assert!(
+        response.status().is_success(),
+        "Patched zstd request should succeed, got {} — body: {:?}",
+        response.status(),
+        response.text().await
+    );
+
+    // Re-send since first response was consumed by the assert above
+    let json_bytes2 = serde_json::to_vec(&json_body).unwrap();
+    let compressed2 = zstd::stream::encode_all(std::io::Cursor::new(&json_bytes2), 3).unwrap();
+    let response = client
+        .post(format!("http://127.0.0.1:{proxy_port}/v1/responses"))
+        .header("authorization", "Bearer sk-test-zstd-patch")
+        .header("content-type", "application/json")
+        .header("content-encoding", "zstd")
+        .body(compressed2)
+        .send()
+        .await
+        .unwrap();
+
+    assert!(response.status().is_success());
+    let resp_json: serde_json::Value = response.json().await.unwrap();
+
+    // The echoed input should contain the patched content (not compressed, not original)
+    let echoed = resp_json["echoed_input"].to_string();
+    assert!(
+        echoed.contains("patched zstd content"),
+        "Upstream should receive decompressed+patched body. Echoed: {echoed}"
+    );
+
+    // Captured blocks should reflect patched content
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let blocks = state.capture.all_blocks();
+    let user_block = blocks
+        .iter()
+        .find(|b| b.content.contains("patched zstd content"));
+    assert!(
+        user_block.is_some(),
+        "Capture should contain patched content from decompressed zstd body. Blocks: {:?}",
+        blocks.iter().map(|b| (&b.role, &b.content)).collect::<Vec<_>>()
+    );
 }
 
 #[tokio::test]

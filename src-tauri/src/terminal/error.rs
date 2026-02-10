@@ -5,6 +5,9 @@ pub enum TerminalError {
     #[error("Failed to spawn shell: {0}")]
     SpawnFailed(String),
 
+    #[error("Failed to apply direct context edit: {0}")]
+    DirectEditFailed(String),
+
     #[error("Session not found: {0}")]
     SessionNotFound(String),
 

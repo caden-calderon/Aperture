@@ -95,7 +95,10 @@
 
 {#if block}
   <div
-    class="diff-entry diff-{entry.status}"
+    class="diff-entry"
+    class:diff-added={entry.status === "added"}
+    class:diff-removed={entry.status === "removed"}
+    class:diff-modified={entry.status === "modified"}
     class:highlighted
     role="button"
     tabindex="0"
@@ -130,7 +133,12 @@
     {#if expanded && inlineDiffLines}
       <div class="inline-diff" onclick={(e) => e.stopPropagation()} onkeydown={() => {}} role="presentation">
         {#each inlineDiffLines as line}
-          <div class="diff-line diff-line-{line.type}">
+          <div
+            class="diff-line"
+            class:diff-line-added={line.type === "added"}
+            class:diff-line-removed={line.type === "removed"}
+            class:diff-line-unchanged={line.type === "unchanged"}
+          >
             <span class="diff-line-marker">{getDiffMarker(line.type)}</span>
             <span class="diff-line-num">{line.oldLineNum ?? ""}</span>
             <span class="diff-line-num">{line.newLineNum ?? ""}</span>

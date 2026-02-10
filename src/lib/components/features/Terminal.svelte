@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { onMount, onDestroy } from "svelte";
+  import { onMount } from "svelte";
+  import { onDestroy } from "svelte";
   import { Terminal } from "@xterm/xterm";
   import { FitAddon } from "@xterm/addon-fit";
   import { WebLinksAddon } from "@xterm/addon-web-links";
@@ -159,8 +160,7 @@
   /**
    * Launch a provider CLI:
    * - anthropic: Claude via proxy
-   * - openai: Codex direct (ChatGPT subscription mode)
-   * - openai_proxy: Codex via Aperture proxy (API key/scopes required)
+   * - openai: Codex via proxy (full context control)
    */
   export async function launchProvider(provider: LaunchProviderId) {
     if (launchInFlight) return;

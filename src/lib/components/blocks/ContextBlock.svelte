@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { Block } from "$lib/types";
-  import { blockTypesStore } from "$lib/stores";
+  import { blockTypesStore, contextStore } from "$lib/stores";
   import { searchStore, type SearchMatch } from "$lib/stores/search.svelte";
   import { detectLanguage, highlightCode, escapeHtml } from "$lib/utils/syntax";
   import { getPreview } from "$lib/utils/text";
@@ -61,6 +61,7 @@
   const typeInfo = $derived(blockTypesStore.getTypeById(displayTypeId));
   const displayColor = $derived(typeInfo?.color ?? "var(--text-muted)");
   const displayLabel = $derived(typeInfo?.shortLabel ?? displayTypeId.slice(0, 4).toUpperCase());
+  const stalenessScore = $derived(contextStore.getBlockStaleness(block.id) ?? 0);
 
   // Whether to show full content (zone-level expand OR block not collapsed)
   const showContent = $derived(!isCollapsed);
@@ -224,6 +225,9 @@
       <span class="lang-badge">{detectedLang}</span>
     {/if}
     <span class="token-count">{formatTokens(block.tokens)}</span>
+    <span class="staleness-badge" title={`Staleness score ${stalenessScore.toFixed(1)}`}>
+      S:{stalenessScore.toFixed(1)}
+    </span>
     <button
       class="collapse-toggle"
       onclick={toggleCollapse}
@@ -399,6 +403,17 @@
     font-size: 9px;
     color: var(--text-faint);
     font-variant-numeric: tabular-nums;
+  }
+
+  .staleness-badge {
+    font-family: var(--font-mono);
+    font-size: 8px;
+    color: var(--text-faint);
+    font-variant-numeric: tabular-nums;
+    border: 1px solid var(--border-subtle);
+    border-radius: 3px;
+    padding: 1px 4px;
+    background: var(--bg-inset);
   }
 
   .collapse-toggle {

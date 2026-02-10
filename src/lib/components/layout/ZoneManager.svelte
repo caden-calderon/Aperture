@@ -27,14 +27,26 @@
     return zoneBlocks.reduce((sum, b) => sum + b.tokens, 0);
   }
 
+  function blockedReason(reason: string | undefined, fallback = "Action blocked by policy"): string {
+    return reason && reason.trim().length > 0 ? reason : fallback;
+  }
+
   // Click on zone: if no selection, select all in zone; if has selection, move to zone
-  function handleZoneClick(zoneId: string) {
+  async function handleZoneClick(zoneId: string) {
     if (selectionStore.hasSelection) {
       const blockIds = [...selectionStore.selectedIds];
-      contextStore.moveBlocks(blockIds, zoneId as Zone);
-      const count = blockIds.length;
+      const result = await contextStore.moveBlocks(blockIds, zoneId as Zone);
+      if (!result.applied) {
+        uiStore.showToast(blockedReason(result.reason), 'warning');
+        return;
+      }
+      const count = result.affected;
       const zone = zonesStore.getZoneById(zoneId);
-      uiStore.showToast(`Moved ${count} block(s) to ${zone?.label ?? zoneId}`, 'success');
+      if (count === 0) {
+        uiStore.showToast(`No blocks moved to ${zone?.label ?? zoneId}`, 'info');
+      } else {
+        uiStore.showToast(`Moved ${count} block(s) to ${zone?.label ?? zoneId}`, 'success');
+      }
     } else {
       selectionStore.selectZone(zoneId as "primacy" | "middle" | "recency");
       const count = selectionStore.count;
@@ -48,7 +60,7 @@
   }
 
   // Handle drop on zone (blocks)
-  function handleBlockDrop(e: DragEvent, zoneId: string) {
+  async function handleBlockDrop(e: DragEvent, zoneId: string) {
     e.preventDefault();
     e.stopPropagation();
     const data = e.dataTransfer?.getData('text/plain');
@@ -56,12 +68,24 @@
       try {
         const blockIds: string[] = JSON.parse(data);
         if (Array.isArray(blockIds)) {
-          contextStore.moveBlocks(blockIds, zoneId as Zone);
+          const result = await contextStore.moveBlocks(blockIds, zoneId as Zone);
+          if (!result.applied) {
+            uiStore.showToast(blockedReason(result.reason), 'warning');
+            return;
+          }
           const zone = zonesStore.getZoneById(zoneId);
-          uiStore.showToast(`Moved ${blockIds.length} block(s) to ${zone?.label ?? zoneId}`, 'success');
+          if (result.affected === 0) {
+            uiStore.showToast(`No blocks moved to ${zone?.label ?? zoneId}`, 'info');
+          } else {
+            uiStore.showToast(`Moved ${result.affected} block(s) to ${zone?.label ?? zoneId}`, 'success');
+          }
         }
       } catch {
-        contextStore.moveBlock(data, zoneId as Zone);
+        const result = await contextStore.moveBlock(data, zoneId as Zone);
+        if (!result.applied) {
+          uiStore.showToast(blockedReason(result.reason), 'warning');
+          return;
+        }
         const zone = zonesStore.getZoneById(zoneId);
         uiStore.showToast(`Moved block to ${zone?.label ?? zoneId}`, 'success');
       }
@@ -95,7 +119,7 @@
     dragOverZoneId = null;
   }
 
-  function handleZoneDrop(e: DragEvent, targetZoneId: string) {
+  async function handleZoneDrop(e: DragEvent, targetZoneId: string) {
     e.preventDefault();
     e.stopPropagation();
 
@@ -115,7 +139,7 @@
       }
     } else {
       // It's a block drop
-      handleBlockDrop(e, targetZoneId);
+      await handleBlockDrop(e, targetZoneId);
     }
 
     draggedZoneId = null;

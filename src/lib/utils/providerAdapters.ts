@@ -1,4 +1,8 @@
-export type LaunchProviderId = 'anthropic' | 'openai' | 'openai_proxy';
+export type LaunchProviderId = 'anthropic' | 'openai';
+export type ContextMutationMode = 'proxy_mutable' | 'direct_read_only';
+
+export const DIRECT_MODE_EDIT_BLOCK_REASON =
+  'Codex was launched independently (not through Aperture). Relaunch from the terminal panel for full context control.';
 
 export interface ProviderCapabilities {
   supportsUsage: boolean;
@@ -34,26 +38,12 @@ const PROVIDER_ADAPTERS: Record<LaunchProviderId, ProviderAdapter> = {
   },
   openai: {
     id: 'openai',
-    label: 'Codex Direct',
-    quickLaunchLabel: 'Codex (ChatGPT Direct)',
-    command: 'codex',
-    transport: 'direct_cli_bridge',
-    startsCodexBridge: true,
-    startupMarkers: ['OpenAI Codex', 'codex resume '],
-    capabilities: {
-      supportsUsage: false,
-      supportsReasoning: true,
-      supportsResumeId: true,
-    },
-  },
-  openai_proxy: {
-    id: 'openai_proxy',
-    label: 'Codex Proxy',
-    quickLaunchLabel: 'Codex (API via Proxy)',
+    label: 'Codex',
+    quickLaunchLabel: 'Codex',
     command: 'codex',
     transport: 'proxy',
-    startsCodexBridge: false,
-    startupMarkers: [],
+    startsCodexBridge: true,
+    startupMarkers: ['OpenAI Codex', 'codex resume '],
     capabilities: {
       supportsUsage: true,
       supportsReasoning: true,
@@ -62,7 +52,7 @@ const PROVIDER_ADAPTERS: Record<LaunchProviderId, ProviderAdapter> = {
   },
 };
 
-const ADAPTER_ORDER: LaunchProviderId[] = ['anthropic', 'openai', 'openai_proxy'];
+const ADAPTER_ORDER: LaunchProviderId[] = ['anthropic', 'openai'];
 
 export function listProviderAdapters(): ProviderAdapter[] {
   return ADAPTER_ORDER.map((id) => PROVIDER_ADAPTERS[id]);
@@ -99,4 +89,18 @@ export function formatProviderCapabilities(capabilities: ProviderCapabilities): 
   const reasoning = capabilities.supportsReasoning ? 'reasoning' : 'no-reasoning';
   const resume = capabilities.supportsResumeId ? 'resume-id' : 'no-resume-id';
   return `${usage} · ${reasoning} · ${resume}`;
+}
+
+export function contextMutationModeForProvider(
+  provider: LaunchProviderId | 'none'
+): ContextMutationMode {
+  if (provider === 'none') return 'proxy_mutable';
+  return getProviderAdapter(provider).transport === 'proxy'
+    ? 'proxy_mutable'
+    : 'direct_read_only';
+}
+
+export function contextModeBadgeLabel(mode: ContextMutationMode): string {
+  if (mode === 'direct_read_only') return 'Direct (Observe Only)';
+  return 'Proxy (Full Control)';
 }

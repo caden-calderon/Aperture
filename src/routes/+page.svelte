@@ -1,9 +1,24 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { invoke } from "@tauri-apps/api/core";
   import { TokenBudgetBar, Zone, Modal, Toast, CommandPalette, ThemeToggle, DensityControl, TitleBar, ThemeCustomizer, BlockTypeManager, ZoneManager, SearchBar, TerminalPanel, ContextMenu, ZoneMinimap, ContextDiff } from "$lib/components";
   import { contextStore, selectionStore, uiStore, themeStore, blockTypesStore, zonesStore, searchStore, terminalStore, editHistoryStore, connectionStore } from "$lib/stores";
   import { createResizable, createBlockHandlers, createModalHandlers, createKeyboardHandlers, createCommandHandlers } from "$lib/composables";
+  import { convertBlock, type RustBlock } from "$lib/utils/blockConvert";
   import type { Zone as ZoneType } from "$lib/types";
+
+  interface EngineSessionInfo {
+    id: string;
+    provider: string;
+    model: string;
+    source: string;
+    thread_identity?: string | null;
+    started_at: string;
+    block_count: number;
+    exchange_count: number;
+    total_tokens: number;
+    token_budget: number;
+  }
 
   // -- Composables --
 
@@ -43,6 +58,57 @@
 
   // Zones container ref (for minimap scroll targeting)
   let zonesRef = $state<HTMLElement | null>(null);
+  let engineSessions = $state<EngineSessionInfo[]>([]);
+  let activeEngineSessionId = $state<string | null>(null);
+  let switchingSession = $state(false);
+
+  function sessionLabel(session: EngineSessionInfo): string {
+    return `${session.provider}/${session.model} · ${session.block_count} blocks`;
+  }
+
+  async function refreshEngineState(): Promise<void> {
+    const [rustBlocks, budget, sessions, active] = await Promise.all([
+      invoke<RustBlock[]>("engine_get_blocks"),
+      invoke<{ limit_tokens: number }>("engine_get_budget_status"),
+      invoke<EngineSessionInfo[]>("engine_get_sessions"),
+      invoke<EngineSessionInfo | null>("engine_get_active_session"),
+    ]);
+
+    activeEngineSessionId = active?.id ?? null;
+    contextStore.setActiveEngineSession(activeEngineSessionId, active?.thread_identity ?? null);
+    contextStore.setEngineBlocks(rustBlocks.map(convertBlock));
+    selectionStore.pruneStaleSelection();
+    contextStore.setEngineBudget(budget.limit_tokens);
+    engineSessions = sessions.sort((a, b) => b.started_at.localeCompare(a.started_at));
+  }
+
+  async function handleSessionSwitch(e: Event): Promise<void> {
+    const target = e.currentTarget as HTMLSelectElement | null;
+    const nextSessionId = target?.value ?? "";
+    if (!nextSessionId || nextSessionId === activeEngineSessionId || switchingSession) {
+      return;
+    }
+
+    switchingSession = true;
+    try {
+      const switched = await invoke<boolean>("engine_switch_session", { sessionId: nextSessionId });
+      if (!switched) {
+        uiStore.showToast("Could not switch session", "warning");
+        return;
+      }
+      selectionStore.deselect();
+      await refreshEngineState();
+      const session = engineSessions.find((item) => item.id === nextSessionId);
+      uiStore.showToast(
+        `Switched to ${session ? `${session.provider}/${session.model}` : nextSessionId}`,
+        "info"
+      );
+    } catch {
+      uiStore.showToast("Session switching unavailable", "warning");
+    } finally {
+      switchingSession = false;
+    }
+  }
 
   // Initialize stores on mount
   onMount(() => {
@@ -57,14 +123,25 @@
     editHistoryStore.init();
     contextStore.init();
 
-    // Connect to proxy and subscribe to live events
-    connectionStore.onBlocksCaptured((requestBlocks, responseBlocks) => {
-      contextStore.setLiveBlocks(requestBlocks, responseBlocks);
+    // Connect to proxy and subscribe to engine-processed events
+    connectionStore.onContextUpdated(async () => {
+      try {
+        await refreshEngineState();
+      } catch {
+        // Not in Tauri or engine unavailable — ignore
+      }
     });
     connectionStore.onSessionReset(() => {
       contextStore.clearBlocks();
+      contextStore.setActiveEngineSession(null, null);
+      selectionStore.deselect();
+      engineSessions = [];
+      activeEngineSessionId = null;
     });
     connectionStore.connect();
+    void refreshEngineState().catch(() => {
+      // Not in Tauri or engine unavailable — ignore
+    });
 
     // Flush debounced localStorage writes + cleanup terminal on window close
     const handleBeforeUnload = () => {
@@ -106,6 +183,11 @@
     terminalPanelComponentRef?.updateTheme();
   });
 
+  // Keep context mutation guardrails aligned with terminal transport mode.
+  $effect(() => {
+    contextStore.setContextMutationMode(terminalStore.contextMutationMode);
+  });
+
   function formatNumber(n: number): string {
     return n.toLocaleString();
   }
@@ -128,6 +210,31 @@
     </div>
 
     <div class="header-right">
+      {#if engineSessions.length > 0}
+        <label class="session-switcher">
+          <span class="session-label">Session</span>
+          <select
+            class="session-select"
+            value={activeEngineSessionId ?? ""}
+            onchange={handleSessionSwitch}
+            disabled={switchingSession || engineSessions.length < 2}
+          >
+            {#each engineSessions as session (session.id)}
+              <option value={session.id}>{sessionLabel(session)}</option>
+            {/each}
+          </select>
+        </label>
+      {/if}
+      <span
+        class="mode-badge"
+        class:mode-badge-direct={terminalStore.contextMutationMode.startsWith("direct")}
+        class:mode-badge-readonly={terminalStore.contextMutationMode === "direct_read_only"}
+        title={terminalStore.contextMutationMode === "direct_read_only"
+          ? "Codex launched independently — observe only. Relaunch from terminal for full control."
+          : "Proxy mode — full context control (edit, compress, reorder blocks)."}
+      >
+        {terminalStore.contextModeLabel}
+      </span>
       <ThemeToggle />
       <button class="btn" onclick={() => contextStore.loadDemoData()}>Demo</button>
       <button class="btn btn-primary" onclick={() => uiStore.toggleCommandPalette()}>
@@ -371,11 +478,14 @@
               <button
                 class="btn btn-sm btn-danger"
                 disabled={!selectionStore.hasSelection}
-                onclick={() => {
-                  const count = selectionStore.count;
-                  contextStore.removeBlocks([...selectionStore.selectedIds]);
-                  selectionStore.deselect();
-                  uiStore.showToast(`Removed ${count} block(s)`, "success");
+                onclick={async () => {
+                  const result = await contextStore.removeBlocks([...selectionStore.selectedIds]);
+                  if (result.applied) {
+                    selectionStore.deselect();
+                    uiStore.showToast(`Removed ${result.affected} block(s)`, "success");
+                  } else {
+                    uiStore.showToast(result.reason ?? "Action blocked by policy", "warning");
+                  }
                 }}
               >
                 Remove
@@ -516,9 +626,13 @@
     uiStore.closeModal();
     diffViewOpen = true;
   }}
-  onRevert={(blockId, content) => {
-    contextStore.updateBlockContent(blockId, content);
-    uiStore.showToast("Reverted to previous version", "success");
+  onRevert={async (blockId, content) => {
+    const result = await contextStore.updateBlockContent(blockId, content);
+    if (result.applied) {
+      uiStore.showToast("Reverted to previous version", "success");
+    } else {
+      uiStore.showToast(result.reason ?? "Action blocked by policy", "warning");
+    }
   }}
   snapshots={contextStore.snapshots}
 />
@@ -540,9 +654,13 @@
   filterZone={diffFilterZone}
   highlightBlockId={diffHighlightBlockId}
   onOpenBlock={(blockId: string) => { diffViewOpen = false; diffFilterZone = null; diffHighlightBlockId = null; uiStore.openModal(blockId); }}
-  onRevert={(blockId: string, content: string) => {
-    contextStore.updateBlockContent(blockId, content);
-    uiStore.showToast("Reverted to snapshot version", "success");
+  onRevert={async (blockId: string, content: string) => {
+    const result = await contextStore.updateBlockContent(blockId, content);
+    if (result.applied) {
+      uiStore.showToast("Reverted to snapshot version", "success");
+    } else {
+      uiStore.showToast(result.reason ?? "Action blocked by policy", "warning");
+    }
   }}
 />
 
@@ -592,6 +710,63 @@
     align-items: center;
     gap: var(--space-sm);
     flex-shrink: 0;
+  }
+
+  .session-switcher {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+  }
+
+  .session-label {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+  }
+
+  .session-select {
+    min-width: 210px;
+    max-width: 290px;
+    padding: 4px 8px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--text-secondary);
+    background: var(--bg-surface);
+    border: 1px solid var(--border-default);
+    border-radius: 4px;
+  }
+
+  .session-select:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .mode-badge {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.25px;
+    color: var(--semantic-success);
+    border: 1px solid color-mix(in srgb, var(--semantic-success) 45%, transparent);
+    background: color-mix(in srgb, var(--semantic-success) 10%, transparent);
+    border-radius: 999px;
+    padding: 3px 8px;
+    white-space: nowrap;
+  }
+
+  .mode-badge.mode-badge-direct {
+    color: var(--semantic-info);
+    border-color: color-mix(in srgb, var(--semantic-info) 55%, transparent);
+    background: color-mix(in srgb, var(--semantic-info) 14%, transparent);
+  }
+
+  .mode-badge.mode-badge-readonly {
+    color: var(--semantic-warning);
+    border-color: color-mix(in srgb, var(--semantic-warning) 55%, transparent);
+    background: color-mix(in srgb, var(--semantic-warning) 14%, transparent);
   }
 
   /* Buttons */

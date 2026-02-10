@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// A pending edit to apply to the next outbound request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,6 +63,16 @@ impl HotPatchQueue {
             .unwrap_or_default()
     }
 
+    /// Clone all pending patches without removing them.
+    ///
+    /// Patches persist and re-apply on every outbound request until
+    /// explicitly cleared. This is critical because LLM tools (Claude Code,
+    /// Codex) re-send their own conversation history on each request —
+    /// a one-shot drain would let the edit revert on the next exchange.
+    pub fn peek_all(&self) -> Vec<HotPatch> {
+        self.patches.lock().map(|q| q.clone()).unwrap_or_default()
+    }
+
     /// Number of pending patches.
     pub fn len(&self) -> usize {
         self.patches.lock().map(|q| q.len()).unwrap_or(0)
@@ -91,7 +101,17 @@ pub fn apply_patches(body: &[u8], patches: &[HotPatch]) -> Option<Vec<u8>> {
         return None;
     }
 
-    let mut json: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let mut json: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(
+                "Hot patch: failed to parse request body as JSON ({e}), \
+                 body_len={} — is the body compressed?",
+                body.len()
+            );
+            return None;
+        }
+    };
     let mut applied = 0;
 
     // Try Anthropic system prompt (top-level "system" field)

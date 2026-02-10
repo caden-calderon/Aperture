@@ -16,6 +16,10 @@ import {
 import { editHistoryStore } from "./editHistory.svelte";
 import { zonesStore } from "./zones.svelte";
 import { invoke } from "@tauri-apps/api/core";
+import {
+  DIRECT_MODE_EDIT_BLOCK_REASON,
+  type ContextMutationMode,
+} from "../utils/providerAdapters";
 
 // ============================================================================
 // State
@@ -23,7 +27,13 @@ import { invoke } from "@tauri-apps/api/core";
 
 let blocks = $state<Block[]>([]);
 let snapshots = $state<Snapshot[]>([]);
-const tokenLimit = 200000;
+let engineBudgetLimit = $state<number | null>(null);
+let activeEngineSessionId = $state<string | null>(null);
+let _activeEngineThreadIdentity = $state<string | null>(null);
+let contextMutationMode = $state<ContextMutationMode>("proxy_mutable");
+let localHotPatchesBySession = $state<
+  Record<string, Array<{ role: Role; originalContent: string; newContent: string }>>
+>({});
 
 // Branching state: null = working state, string = viewing a snapshot
 let activeSnapshotId = $state<string | null>(null);
@@ -34,6 +44,11 @@ let workingStateCache = $state<{ blocks: Block[]; zoneState: SnapshotZoneState }
 // ============================================================================
 
 const STORAGE_KEY = "aperture-context";
+const DEFAULT_PATCH_SESSION_KEY = "__default__";
+
+function patchSessionKey(sessionId: string | null): string {
+  return sessionId ?? DEFAULT_PATCH_SESSION_KEY;
+}
 
 // Debounced persistence
 let _dirty = false;
@@ -120,6 +135,27 @@ function sortBlocksWithPins(zoneBlocks: Block[]): Block[] {
   return [...pinnedTop, ...unpinned, ...pinnedBottom];
 }
 
+const STALENESS_DEFAULTS = {
+  ageWeight: 1.0,
+  tokenWeight: 0.5,
+  baseRelevance: 1.0,
+  referenceBoost: 0.5,
+  maxScore: 100.0,
+} as const;
+
+function calculateStalenessScore(block: Block, currentTurn: number): number {
+  const turnsSinceCreated = Math.max(0, currentTurn - block.metadata.turnIndex);
+  const tokenCost = block.tokens / 1000;
+  const ageFactor = turnsSinceCreated * STALENESS_DEFAULTS.ageWeight;
+  const costFactor = tokenCost * STALENESS_DEFAULTS.tokenWeight;
+  const relevanceBoost =
+    STALENESS_DEFAULTS.baseRelevance +
+    block.referenceCount * STALENESS_DEFAULTS.referenceBoost +
+    block.usageHeat;
+  const raw = relevanceBoost > 0 ? (ageFactor * costFactor) / relevanceBoost : 0;
+  return Math.max(0, Math.min(STALENESS_DEFAULTS.maxScore, raw));
+}
+
 // Dynamic blocks by zone - supports custom zones
 const blocksByZone = $derived.by(() => {
   const result: Record<string, Block[]> = {};
@@ -141,9 +177,8 @@ const blocksByZone = $derived.by(() => {
   return result;
 });
 
-const tokenBudget = $derived<TokenBudget>(calculateTokenBudget(blocks));
-
-const blockMap = $derived(new Map(blocks.map((b) => [b.id, b])));
+const effectiveLimit = $derived(engineBudgetLimit ?? 200_000);
+const tokenBudget = $derived<TokenBudget>(calculateTokenBudget(blocks, effectiveLimit));
 
 const activeStateLabel = $derived.by(() => {
   if (!activeSnapshotId) return "Working State";
@@ -155,12 +190,183 @@ const activeStateLabel = $derived.by(() => {
 // Actions
 // ============================================================================
 
+type EnginePolicyDecision = "allow" | "deny" | "require_confirmation";
+
+interface EnginePolicyResult {
+  decision: EnginePolicyDecision;
+  reason?: string;
+}
+
+export interface MutationOutcome {
+  applied: boolean;
+  decision: EnginePolicyDecision | "not_found";
+  reason?: string;
+  affected: number;
+}
+
+function appliedOutcome(affected: number): MutationOutcome {
+  return { applied: true, decision: "allow", affected };
+}
+
+function blockedOutcome(
+  decision: Extract<EnginePolicyDecision, "deny" | "require_confirmation">,
+  reason?: string
+): MutationOutcome {
+  return { applied: false, decision, reason, affected: 0 };
+}
+
+function notFoundOutcome(message = "Block not found"): MutationOutcome {
+  return { applied: false, decision: "not_found", reason: message, affected: 0 };
+}
+
+function readOnlyModeOutcome(): MutationOutcome {
+  return blockedOutcome("deny", DIRECT_MODE_EDIT_BLOCK_REASON);
+}
+
+function ensureMutableContext(): MutationOutcome | null {
+  return contextMutationMode === "direct_read_only" ? readOnlyModeOutcome() : null;
+}
+
+function parsePolicyDecision(raw: unknown): EnginePolicyResult | null {
+  const parsed =
+    typeof raw === "string"
+      ? (() => {
+          try {
+            return JSON.parse(raw) as unknown;
+          } catch {
+            return null;
+          }
+        })()
+      : raw;
+
+  if (parsed && typeof parsed === "object" && "decision" in parsed) {
+    const decision = (parsed as { decision?: unknown }).decision;
+    if (decision === "allow" || decision === "deny" || decision === "require_confirmation") {
+      const reason = (parsed as { reason?: unknown }).reason;
+      return {
+        decision,
+        reason: typeof reason === "string" ? reason : undefined,
+      };
+    }
+  }
+  return null;
+}
+
+async function invokePolicyDecision(
+  command: string,
+  payload: Record<string, unknown>
+): Promise<EnginePolicyResult | null> {
+  try {
+    const result = await invoke<unknown>(command, payload);
+    return parsePolicyDecision(result);
+  } catch {
+    // Outside Tauri (web tests/dev), treat as no policy signal.
+    return null;
+  }
+}
+
+function requestPolicyConfirmation(reason?: string): boolean {
+  const prompt = reason
+    ? `This action requires confirmation.\n\n${reason}\n\nContinue?`
+    : "This action requires confirmation. Continue?";
+
+  const confirmFn =
+    typeof window !== "undefined" && typeof window.confirm === "function"
+      ? window.confirm.bind(window)
+      : typeof globalThis.confirm === "function"
+        ? globalThis.confirm.bind(globalThis)
+        : null;
+  if (!confirmFn) {
+    return true;
+  }
+
+  try {
+    return confirmFn(prompt);
+  } catch {
+    return true;
+  }
+}
+
+function rememberLocalHotPatch(role: Role, originalContent: string, newContent: string): void {
+  if (originalContent === newContent) return;
+  const key = patchSessionKey(activeEngineSessionId);
+  const current = localHotPatchesBySession[key] ?? [];
+  localHotPatchesBySession = {
+    ...localHotPatchesBySession,
+    [key]: [...current, { role, originalContent, newContent }],
+  };
+}
+
+function applyLocalHotPatches(nextBlocks: Block[]): Block[] {
+  const localHotPatches = localHotPatchesBySession[patchSessionKey(activeEngineSessionId)] ?? [];
+  if (localHotPatches.length === 0) return nextBlocks;
+
+  return nextBlocks.map((block) => {
+    let patchedContent = block.content;
+    for (const patch of localHotPatches) {
+      if (patch.role !== block.role) continue;
+      if (!patchedContent.includes(patch.originalContent)) continue;
+      patchedContent = patchedContent.split(patch.originalContent).join(patch.newContent);
+    }
+    if (patchedContent === block.content) return block;
+
+    const tokens = Math.ceil(patchedContent.length / 4);
+    return {
+      ...block,
+      content: patchedContent,
+      tokens,
+      compressedVersions: {
+        ...block.compressedVersions,
+        original: { content: patchedContent, tokens },
+      },
+    };
+  });
+}
+
+async function ensureMutationAllowed(
+  command: string,
+  payload: Record<string, unknown>
+): Promise<MutationOutcome> {
+  const firstDecision = await invokePolicyDecision(command, payload);
+  if (firstDecision === null || firstDecision.decision === "allow") {
+    return appliedOutcome(0);
+  }
+  if (firstDecision.decision === "deny") {
+    return blockedOutcome("deny", firstDecision.reason ?? "Action blocked by policy");
+  }
+
+  if (!requestPolicyConfirmation(firstDecision.reason)) {
+    return blockedOutcome(
+      "require_confirmation",
+      firstDecision.reason ?? "Action cancelled"
+    );
+  }
+
+  const confirmedDecision = await invokePolicyDecision(command, {
+    ...payload,
+    confirmed: true,
+  });
+  if (confirmedDecision === null || confirmedDecision.decision === "allow") {
+    return appliedOutcome(0);
+  }
+  if (confirmedDecision.decision === "deny") {
+    return blockedOutcome("deny", confirmedDecision.reason ?? "Action blocked by policy");
+  }
+  return blockedOutcome(
+    "require_confirmation",
+    confirmedDecision.reason ?? "Action still requires confirmation"
+  );
+}
+
 function init(): void {
   loadFromLocalStorage();
   // Live proxy context is session-scoped: start empty on app launch.
   blocks = [];
   activeSnapshotId = null;
   workingStateCache = null;
+  activeEngineSessionId = null;
+  _activeEngineThreadIdentity = null;
+  localHotPatchesBySession = {};
   saveToLocalStorage();
   // No demo data auto-load — start empty, blocks arrive via proxy capture.
   // Call loadDemoData() explicitly from the empty state UI if needed.
@@ -173,46 +379,110 @@ function loadDemoData(): void {
 }
 
 function getBlock(id: string): Block | undefined {
-  return blockMap.get(id);
+  return blocks.find((b) => b.id === id);
+}
+
+function getBlockStaleness(id: string): number | undefined {
+  const block = blocks.find((candidate) => candidate.id === id);
+  if (!block) return undefined;
+  const currentTurn =
+    blocks.length > 0 ? Math.max(...blocks.map((candidate) => candidate.metadata.turnIndex)) + 1 : 0;
+  return calculateStalenessScore(block, currentTurn);
 }
 
 function getBlockIndex(id: string): number {
   return blocks.findIndex((b) => b.id === id);
 }
 
-function moveBlock(blockId: string, targetZone: Zone): void {
+async function moveBlock(blockId: string, targetZone: Zone): Promise<MutationOutcome> {
   const index = getBlockIndex(blockId);
-  if (index === -1) return;
+  if (index === -1) return notFoundOutcome();
 
   const oldZone = blocks[index].zone;
-  if (oldZone !== targetZone) {
-    editHistoryStore.recordEdit(blockId, "zone", { zone: oldZone }, { zone: targetZone });
-  }
+  if (oldZone === targetZone) return appliedOutcome(0);
+  const modeGuard = ensureMutableContext();
+  if (modeGuard) return modeGuard;
 
+  const permission = await ensureMutationAllowed("engine_move_block", {
+    blockId,
+    zone: targetZone,
+  });
+  if (!permission.applied) return permission;
+
+  editHistoryStore.recordEdit(blockId, "zone", { zone: oldZone }, { zone: targetZone });
   blocks[index] = { ...blocks[index], zone: targetZone };
   blocks = [...blocks];
   markDirty();
+  return appliedOutcome(1);
 }
 
-function moveBlocks(blockIds: string[], targetZone: Zone): void {
+async function moveBlocks(blockIds: string[], targetZone: Zone): Promise<MutationOutcome> {
   const idSet = new Set(blockIds);
-  blocks = blocks.map((b) => (idSet.has(b.id) ? { ...b, zone: targetZone } : b));
-  markDirty();
+  const existingIds = blocks.filter((b) => idSet.has(b.id)).map((b) => b.id);
+  if (existingIds.length === 0) return notFoundOutcome();
+  const movableIds = blocks
+    .filter((b) => idSet.has(b.id) && b.zone !== targetZone)
+    .map((b) => b.id);
+  if (movableIds.length === 0) return appliedOutcome(0);
+  const modeGuard = ensureMutableContext();
+  if (modeGuard) return modeGuard;
+  const movableSet = new Set(movableIds);
+
+  const permission = await ensureMutationAllowed("engine_bulk_move", {
+    blockIds: movableIds,
+    zone: targetZone,
+  });
+  if (!permission.applied) return permission;
+
+  let changed = 0;
+  blocks = blocks.map((b) => {
+    if (!movableSet.has(b.id)) return b;
+    editHistoryStore.recordEdit(b.id, "zone", { zone: b.zone }, { zone: targetZone });
+    changed += 1;
+    return { ...b, zone: targetZone };
+  });
+
+  if (changed > 0) {
+    blocks = [...blocks];
+    markDirty();
+  }
+  return appliedOutcome(changed);
 }
 
-function removeBlock(blockId: string): void {
+async function removeBlock(blockId: string): Promise<MutationOutcome> {
+  const index = getBlockIndex(blockId);
+  if (index === -1) return notFoundOutcome();
+  const modeGuard = ensureMutableContext();
+  if (modeGuard) return modeGuard;
+
+  const permission = await ensureMutationAllowed("engine_remove_block", { blockId });
+  if (!permission.applied) return permission;
+
   editHistoryStore.clearBlockHistory(blockId);
   blocks = blocks.filter((b) => b.id !== blockId);
   markDirty();
+  return appliedOutcome(1);
 }
 
-function removeBlocks(blockIds: string[]): void {
+async function removeBlocks(blockIds: string[]): Promise<MutationOutcome> {
   const idSet = new Set(blockIds);
-  for (const id of idSet) {
+  const existingIds = blocks.filter((b) => idSet.has(b.id)).map((b) => b.id);
+  if (existingIds.length === 0) return notFoundOutcome();
+  const modeGuard = ensureMutableContext();
+  if (modeGuard) return modeGuard;
+
+  const permission = await ensureMutationAllowed("engine_bulk_remove", {
+    blockIds: existingIds,
+  });
+  if (!permission.applied) return permission;
+
+  for (const id of existingIds) {
     editHistoryStore.clearBlockHistory(id);
   }
+
   blocks = blocks.filter((b) => !idSet.has(b.id));
   markDirty();
+  return appliedOutcome(existingIds.length);
 }
 
 function createBlock(
@@ -248,16 +518,28 @@ function createBlock(
   return newBlock;
 }
 
-function updateBlockContent(blockId: string, content: string): void {
+async function updateBlockContent(blockId: string, content: string): Promise<MutationOutcome> {
   const index = getBlockIndex(blockId);
-  if (index === -1) return;
-
+  if (index === -1) return notFoundOutcome();
   const block = blocks[index];
   const oldContent = block.content;
-  if (oldContent !== content) {
-    editHistoryStore.recordEdit(blockId, "content", { content: oldContent }, { content });
+  if (oldContent === content) return appliedOutcome(0);
+  const modeGuard = ensureMutableContext();
+  if (modeGuard) return modeGuard;
 
-    // Queue hot patch so the edit takes effect on the next outbound request
+  const permission = await ensureMutationAllowed("engine_update_content", {
+    blockId,
+    content,
+    model: "unknown",
+  });
+  if (!permission.applied) return permission;
+
+  editHistoryStore.recordEdit(blockId, "content", { content: oldContent }, { content });
+
+  // Proxy mode uses hot patches for outbound request rewriting.
+  // Both Claude and Codex traffic flows through the proxy, so hot patches
+  // modify the messages/input array before forwarding to the upstream API.
+  if (contextMutationMode === "proxy_mutable") {
     invoke("queue_hot_patch", {
       role: block.role,
       originalContent: oldContent,
@@ -266,6 +548,7 @@ function updateBlockContent(blockId: string, content: string): void {
       // Ignore errors when running outside Tauri (e.g., browser dev)
     });
   }
+  rememberLocalHotPatch(block.role, oldContent, content);
 
   const tokens = Math.ceil(content.length / 4);
   blocks[index] = {
@@ -279,6 +562,7 @@ function updateBlockContent(blockId: string, content: string): void {
   };
   blocks = [...blocks];
   markDirty();
+  return appliedOutcome(1);
 }
 
 function setBlockRole(blockId: string, role: Role, blockType?: string): void {
@@ -402,43 +686,56 @@ function reorderBlocksInZone(
   markDirty();
 }
 
-function setCompressionLevel(
+async function setCompressionLevel(
   blockId: string,
   level: Block["compressionLevel"]
-): void {
+): Promise<MutationOutcome> {
   const index = getBlockIndex(blockId);
-  if (index === -1) return;
-
+  if (index === -1) return notFoundOutcome();
   const oldLevel = blocks[index].compressionLevel;
-  if (oldLevel !== level) {
-    editHistoryStore.recordEdit(
-      blockId, "compression",
-      { compressionLevel: oldLevel },
-      { compressionLevel: level }
-    );
-  }
+  if (oldLevel === level) return appliedOutcome(0);
+  const modeGuard = ensureMutableContext();
+  if (modeGuard) return modeGuard;
+
+  const permission = await ensureMutationAllowed("engine_compress_block", { blockId, level });
+  if (!permission.applied) return permission;
+
+  editHistoryStore.recordEdit(
+    blockId, "compression",
+    { compressionLevel: oldLevel },
+    { compressionLevel: level }
+  );
 
   blocks[index] = { ...blocks[index], compressionLevel: level };
   blocks = [...blocks];
   markDirty();
+  return appliedOutcome(1);
 }
 
-function pinBlock(blockId: string, position: Block["pinned"]): void {
+async function pinBlock(blockId: string, position: Block["pinned"]): Promise<MutationOutcome> {
   const index = getBlockIndex(blockId);
-  if (index === -1) return;
-
+  if (index === -1) return notFoundOutcome();
   const oldPin = blocks[index].pinned;
-  if (oldPin !== position) {
-    editHistoryStore.recordEdit(
-      blockId, "pin",
-      { pinned: oldPin ?? null },
-      { pinned: position ?? null }
-    );
-  }
+  if (oldPin === position) return appliedOutcome(0);
+  const modeGuard = ensureMutableContext();
+  if (modeGuard) return modeGuard;
+
+  const permission = await ensureMutationAllowed("engine_pin_block", {
+    blockId,
+    position: position ?? null,
+  });
+  if (!permission.applied) return permission;
+
+  editHistoryStore.recordEdit(
+    blockId, "pin",
+    { pinned: oldPin ?? null },
+    { pinned: position ?? null }
+  );
 
   blocks[index] = { ...blocks[index], pinned: position };
   blocks = [...blocks];
   markDirty();
+  return appliedOutcome(1);
 }
 
 function getValidDropRange(zone: Zone): { min: number; max: number } {
@@ -484,7 +781,32 @@ function isLikelyCliStartupNoise(requestBlocks: Block[], responseBlocks: Block[]
 /** Clear all live blocks (used on session reset). */
 function clearBlocks(): void {
   blocks = [];
+  activeEngineSessionId = null;
+  _activeEngineThreadIdentity = null;
+  localHotPatchesBySession = {};
   markDirty();
+}
+
+/** Replace blocks with engine-processed data (enriched with zones, tokens, heat). */
+function setEngineBlocks(newBlocks: Block[]): void {
+  if (activeSnapshotId !== null) return; // Don't overwrite snapshot view
+  blocks = applyLocalHotPatches(newBlocks);
+  markDirty();
+}
+
+/** Set the active engine session used for session-scoped local hot patch overlays. */
+function setActiveEngineSession(sessionId: string | null, threadIdentity: string | null = null): void {
+  activeEngineSessionId = sessionId;
+  _activeEngineThreadIdentity = threadIdentity;
+}
+
+function setContextMutationMode(mode: ContextMutationMode): void {
+  contextMutationMode = mode;
+}
+
+/** Set the engine-reported budget limit (overrides default 200k). */
+function setEngineBudget(limit: number): void {
+  engineBudgetLimit = limit;
 }
 
 /** Append new response blocks to existing context (incremental). */
@@ -623,7 +945,7 @@ export const contextStore = {
     return tokenBudget;
   },
   get tokenLimit() {
-    return tokenLimit;
+    return effectiveLimit;
   },
   get snapshots() {
     return snapshots;
@@ -634,15 +956,29 @@ export const contextStore = {
   get activeStateLabel() {
     return activeStateLabel;
   },
+  get contextMutationMode() {
+    return contextMutationMode;
+  },
+  get isReadOnlyMode() {
+    return contextMutationMode === "direct_read_only";
+  },
+  get mutationBlockedReason() {
+    return DIRECT_MODE_EDIT_BLOCK_REASON;
+  },
 
   // Actions
   init,
   flushPendingWrites,
   loadDemoData,
   setLiveBlocks,
+  setEngineBlocks,
+  setActiveEngineSession,
+  setContextMutationMode,
+  setEngineBudget,
   clearBlocks,
   appendResponseBlocks,
   getBlock,
+  getBlockStaleness,
   getBlockIndex,
   moveBlock,
   moveBlocks,

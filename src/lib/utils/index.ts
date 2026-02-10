@@ -19,3 +19,9 @@ export {
   type ProviderAdapter,
   type ProviderCapabilities,
 } from './providerAdapters';
+export {
+  convertBlock,
+  convertZone,
+  type BlocksCapturedPayload,
+  type RustBlock,
+} from './blockConvert';

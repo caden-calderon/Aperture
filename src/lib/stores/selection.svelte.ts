@@ -141,6 +141,22 @@ function handleClick(
   }
 }
 
+function pruneStaleSelection(): void {
+  const validIds = new Set(contextStore.blocks.map((b) => b.id));
+  for (const id of selectedIds) {
+    if (!validIds.has(id)) {
+      selectedIds.delete(id);
+    }
+  }
+  if (focusedId !== null && !validIds.has(focusedId)) {
+    focusedId = null;
+  }
+  if (_lastSelectedId !== null && !validIds.has(_lastSelectedId)) {
+    _lastSelectedId = null;
+    lastSelectedIndex = null;
+  }
+}
+
 // ============================================================================
 // Export Store Interface
 // ============================================================================
@@ -148,21 +164,27 @@ function handleClick(
 export const selectionStore = {
   // Reactive getters
   get selectedIds() {
+    pruneStaleSelection();
     return selectedIds;
   },
   get selectedBlocks() {
+    pruneStaleSelection();
     return selectedBlocks;
   },
   get selectedTokens() {
+    pruneStaleSelection();
     return selectedTokens;
   },
   get hasSelection() {
+    pruneStaleSelection();
     return hasSelection;
   },
   get count() {
+    pruneStaleSelection();
     return selectedIds.size;
   },
   get focusedId() {
+    pruneStaleSelection();
     return focusedId;
   },
 
@@ -178,4 +200,5 @@ export const selectionStore = {
   isSelected,
   handleClick,
   focus,
+  pruneStaleSelection,
 };
