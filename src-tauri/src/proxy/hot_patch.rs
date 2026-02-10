@@ -55,14 +55,6 @@ impl HotPatchQueue {
         }
     }
 
-    /// Drain all pending patches (returns them and clears the queue).
-    pub fn drain(&self) -> Vec<HotPatch> {
-        self.patches
-            .lock()
-            .map(|mut q| std::mem::take(&mut *q))
-            .unwrap_or_default()
-    }
-
     /// Clone all pending patches without removing them.
     ///
     /// Patches persist and re-apply on every outbound request until
@@ -213,7 +205,7 @@ mod tests {
     }
 
     #[test]
-    fn test_queue_enqueue_and_drain() {
+    fn test_queue_enqueue_and_peek_all() {
         let queue = HotPatchQueue::new();
         assert!(queue.is_empty());
 
@@ -221,9 +213,9 @@ mod tests {
         queue.enqueue(make_patch("system", "old", "new"));
         assert_eq!(queue.len(), 2);
 
-        let drained = queue.drain();
-        assert_eq!(drained.len(), 2);
-        assert!(queue.is_empty());
+        let peeked = queue.peek_all();
+        assert_eq!(peeked.len(), 2);
+        assert_eq!(queue.len(), 2); // peek_all doesn't consume
     }
 
     #[test]

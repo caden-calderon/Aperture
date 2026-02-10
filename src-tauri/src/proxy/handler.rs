@@ -175,6 +175,180 @@ fn build_upstream_url(
     }
 }
 
+/// Dispatch events and feed engine after an exchange completes.
+fn finalize_exchange(
+    state: &ProxyState,
+    request_id: &str,
+    status: u16,
+    exchange: &super::capture::CapturedExchange,
+) {
+    if let Some(ref dispatcher) = state.dispatcher {
+        let total_tokens = exchange
+            .usage
+            .as_ref()
+            .map(|u| u.input_tokens + u.output_tokens);
+        dispatcher.response_complete(request_id, status, total_tokens);
+        dispatcher.blocks_captured(exchange);
+    }
+
+    if let Some(ref engine) = state.engine {
+        engine.ingest(
+            &exchange.provider.to_string(),
+            &exchange.model,
+            "proxy",
+            None,
+            exchange.request_blocks.clone(),
+            exchange.response_blocks.clone(),
+        );
+    }
+}
+
+/// Handle a streaming SSE response: tee chunks to client + accumulate for capture.
+#[allow(clippy::too_many_arguments)]
+fn handle_streaming_response(
+    state: Arc<ProxyState>,
+    request_id: String,
+    upstream_url: String,
+    status: StatusCode,
+    headers: reqwest::header::HeaderMap,
+    upstream_response: reqwest::Response,
+    request_start: Instant,
+    upstream_latency: Duration,
+) -> Response {
+    let mut upstream_stream = upstream_response.bytes_stream();
+    let upstream_latency_ms = upstream_latency.as_millis() as u64;
+    let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(32);
+
+    tokio::spawn(async move {
+        let mut total_bytes: u64 = 0;
+        let mut chunk_count: u64 = 0;
+        let mut stream_error: Option<String> = None;
+
+        while let Some(chunk_result) = upstream_stream.next().await {
+            match chunk_result {
+                Ok(chunk) => {
+                    chunk_count += 1;
+                    let bytes_received = state
+                        .capture
+                        .append_sse_chunk(&request_id, &chunk);
+                    total_bytes = bytes_received;
+
+                    // Emit streaming progress (throttled — every 4KB)
+                    if let Some(ref dispatcher) = state.dispatcher {
+                        if bytes_received % 4096 < chunk.len() as u64 {
+                            dispatcher.response_streaming(&request_id, bytes_received);
+                        }
+                    }
+
+                    if tx.send(Ok(chunk)).await.is_err() {
+                        debug!(request_id = %request_id, "Client disconnected during SSE stream");
+                        break;
+                    }
+                }
+                Err(e) => {
+                    stream_error = Some(e.to_string());
+                    let _ = tx.send(Err(std::io::Error::other(e.to_string()))).await;
+                    break;
+                }
+            }
+        }
+
+        // Log stream completion diagnostics
+        if let Some(ref err) = stream_error {
+            error!(
+                request_id = %request_id,
+                upstream = %upstream_url,
+                bytes_received = total_bytes,
+                chunks = chunk_count,
+                elapsed_ms = request_start.elapsed().as_millis() as u64,
+                error = %err,
+                "SSE stream disconnected with error"
+            );
+        } else if total_bytes == 0 {
+            error!(
+                request_id = %request_id,
+                upstream = %upstream_url,
+                elapsed_ms = request_start.elapsed().as_millis() as u64,
+                "SSE stream completed with zero bytes (possible upstream rejection)"
+            );
+        }
+
+        // Finalize capture and dispatch events
+        if let Some(exchange) = state.capture.finalize_streaming(&request_id) {
+            finalize_exchange(&state, &request_id, status.as_u16(), &exchange);
+
+            debug!(
+                request_id = %request_id,
+                upstream_latency_ms,
+                total_latency_ms = request_start.elapsed().as_millis() as u64,
+                bytes_received = exchange.bytes_received,
+                response_status = status.as_u16(),
+                "Completed streaming proxy request"
+            );
+        }
+    });
+
+    let body = Body::from_stream(ReceiverStream::new(rx));
+    let mut response = Response::new(body);
+    *response.status_mut() = status;
+    *response.headers_mut() = convert_headers(&headers);
+    response
+}
+
+/// Handle a non-streaming response: read body, capture, emit events.
+#[allow(clippy::too_many_arguments)]
+async fn handle_non_streaming_response(
+    state: &Arc<ProxyState>,
+    request_id: &str,
+    status: StatusCode,
+    headers: &reqwest::header::HeaderMap,
+    upstream_response: reqwest::Response,
+    request_was_captured: bool,
+    request_start: Instant,
+    upstream_latency: Duration,
+) -> Result<Response, ProxyError> {
+    let response_bytes = upstream_response.bytes().await?;
+
+    // Log response body preview (slice raw bytes BEFORE lossy conversion
+    // to avoid panicking on multi-byte char boundaries).
+    if tracing::enabled!(Level::DEBUG) {
+        let preview = if response_bytes.len() > 500 {
+            format!(
+                "{}... ({} bytes total)",
+                String::from_utf8_lossy(&response_bytes[..500]),
+                response_bytes.len()
+            )
+        } else {
+            String::from_utf8_lossy(&response_bytes).to_string()
+        };
+        debug!("Response body: {}", preview);
+    }
+
+    if request_was_captured {
+        if let Some(exchange) =
+            state
+                .capture
+                .capture_response(request_id, status.as_u16(), &response_bytes)
+        {
+            finalize_exchange(state, request_id, status.as_u16(), &exchange);
+        }
+    }
+
+    debug!(
+        request_id = %request_id,
+        upstream_latency_ms = upstream_latency.as_millis() as u64,
+        total_latency_ms = request_start.elapsed().as_millis() as u64,
+        response_bytes = response_bytes.len(),
+        response_status = status.as_u16(),
+        "Completed non-streaming proxy request"
+    );
+
+    let mut response = Response::new(Body::from(response_bytes));
+    *response.status_mut() = status;
+    *response.headers_mut() = convert_headers(headers);
+    Ok(response)
+}
+
 /// Forward a request to the upstream server with capture integration.
 async fn forward_request(
     state: &Arc<ProxyState>,
@@ -202,7 +376,7 @@ async fn forward_request(
             }
         })?;
 
-    // Detect zstd content-encoding on the request body.
+    // Detect and decompress zstd content-encoding.
     // Codex CLI sends zstd-compressed request bodies — we need to decompress
     // for hot-patch matching and capture JSON parsing, but forward the original
     // compressed bytes when no patches are applied (transparent byte-passthrough).
@@ -213,8 +387,6 @@ async fn forward_request(
         .map(|ce| ce.contains(CONTENT_ENCODING_ZSTD))
         .unwrap_or(false);
 
-    // Decompress for internal processing (hot-patch + capture).
-    // The original `body_bytes` are preserved for transparent forwarding.
     let decompressed_body = if is_zstd {
         match zstd::stream::decode_all(std::io::Cursor::new(&body_bytes)) {
             Ok(decoded) => {
@@ -234,12 +406,8 @@ async fn forward_request(
         None
     };
 
-    // Body for JSON processing: decompressed if zstd, otherwise raw bytes.
     let body_for_processing = decompressed_body.as_ref().unwrap_or(&body_bytes);
 
-    // Log request body preview only when debug logging is enabled.
-    // Slice raw bytes BEFORE lossy conversion to avoid panicking on
-    // multi-byte char boundaries.
     if tracing::enabled!(Level::DEBUG) && !body_for_processing.is_empty() {
         let preview = if body_for_processing.len() > 500 {
             format!(
@@ -266,7 +434,6 @@ async fn forward_request(
                     body_for_processing.len(),
                     patched.len()
                 );
-                // Patched body is decompressed JSON — upstream gets uncompressed body
                 (Bytes::from(patched), true)
             }
             None => (body_bytes.clone(), false),
@@ -277,31 +444,20 @@ async fn forward_request(
 
     // Capture from decompressed (and possibly patched) body so blocks parse correctly.
     let capture_body = if body_was_patched {
-        &forwarded_body // already decompressed JSON
+        &forwarded_body
     } else {
-        body_for_processing // decompressed (or raw if not zstd)
+        body_for_processing
     };
     let parsed = state
         .capture
         .capture_request(request_id, path, capture_body);
 
-    // Emit request captured event
     if let (Some(ref dispatcher), Some(ref parsed)) = (&state.dispatcher, &parsed) {
         dispatcher.request_captured(request_id, method, path, &parsed.provider.to_string());
     }
 
-    // Build upstream request
+    // Build upstream request, forwarding headers with hop-by-hop stripping.
     let mut upstream_req = state.client.request(parts.method, upstream_url);
-
-    // Forward headers, stripping hop-by-hop and proxy-unsafe headers:
-    // - Host: reqwest sets the correct Host from the upstream URL
-    // - Content-Length: reqwest recalculates from the actual body
-    // - Connection: hop-by-hop header, not meant to traverse proxies
-    // - Accept-Encoding: prevents upstream from compressing responses,
-    //   which avoids decompression conflicts in the proxy's byte-passthrough
-    //   pipeline (fixes ChatGPT backend stream disconnects)
-    // - Content-Encoding: stripped when body was patched (decompressed),
-    //   since the forwarded body is now uncompressed JSON
     for (key, value) in parts.headers.iter() {
         if key == header::HOST
             || key == header::CONTENT_LENGTH
@@ -310,8 +466,6 @@ async fn forward_request(
         {
             continue;
         }
-        // When patches modified a compressed body, the forwarded body is
-        // decompressed JSON — don't tell upstream it's still compressed.
         if body_was_patched && key == header::CONTENT_ENCODING {
             debug!("Stripping Content-Encoding header (body was decompressed for patching)");
             continue;
@@ -336,8 +490,8 @@ async fn forward_request(
         );
     }
 
+    // Send request upstream
     let upstream_send_start = Instant::now();
-    // Send request (with potentially patched body)
     let upstream_response = upstream_req
         .body(forwarded_body)
         .send()
@@ -353,10 +507,8 @@ async fn forward_request(
 
     let status = upstream_response.status();
     let headers = upstream_response.headers().clone();
-
     log_headers("Response", &headers);
 
-    // Check if this is a streaming response (SSE)
     let is_streaming = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -365,188 +517,28 @@ async fn forward_request(
 
     if is_streaming {
         debug!("Streaming SSE response");
-
-        // Tee the stream: forward chunks to client AND accumulate for capture
-        let request_id_owned = request_id.to_string();
-        let upstream_url_owned = upstream_url.to_string();
-        let state_clone = state.clone();
-        let mut upstream_stream = upstream_response.bytes_stream();
-        let stream_start = request_start;
-        let upstream_latency_ms = upstream_latency.as_millis() as u64;
-
-        let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(32);
-
-        // Spawn a task to read from upstream and fan out
-        tokio::spawn(async move {
-            let mut total_bytes: u64 = 0;
-            let mut chunk_count: u64 = 0;
-            let mut stream_error: Option<String> = None;
-
-            while let Some(chunk_result) = upstream_stream.next().await {
-                match chunk_result {
-                    Ok(chunk) => {
-                        chunk_count += 1;
-                        // Accumulate for capture
-                        let bytes_received = state_clone
-                            .capture
-                            .append_sse_chunk(&request_id_owned, &chunk);
-                        total_bytes = bytes_received;
-
-                        // Emit streaming progress (throttled — every 4KB)
-                        if let Some(ref dispatcher) = state_clone.dispatcher {
-                            if bytes_received % 4096 < chunk.len() as u64 {
-                                dispatcher.response_streaming(&request_id_owned, bytes_received);
-                            }
-                        }
-
-                        // Forward to client
-                        if tx.send(Ok(chunk)).await.is_err() {
-                            debug!(
-                                request_id = %request_id_owned,
-                                "Client disconnected during SSE stream"
-                            );
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        stream_error = Some(e.to_string());
-                        let _ = tx.send(Err(std::io::Error::other(e.to_string()))).await;
-                        break;
-                    }
-                }
-            }
-
-            // Log stream completion diagnostics
-            if let Some(ref err) = stream_error {
-                error!(
-                    request_id = %request_id_owned,
-                    upstream = %upstream_url_owned,
-                    bytes_received = total_bytes,
-                    chunks = chunk_count,
-                    elapsed_ms = stream_start.elapsed().as_millis() as u64,
-                    error = %err,
-                    "SSE stream disconnected with error"
-                );
-            } else if total_bytes == 0 {
-                error!(
-                    request_id = %request_id_owned,
-                    upstream = %upstream_url_owned,
-                    elapsed_ms = stream_start.elapsed().as_millis() as u64,
-                    "SSE stream completed with zero bytes (possible upstream rejection)"
-                );
-            }
-
-            // Stream complete — finalize capture
-            if let Some(exchange) = state_clone.capture.finalize_streaming(&request_id_owned) {
-                if let Some(ref dispatcher) = state_clone.dispatcher {
-                    let total_tokens = exchange
-                        .usage
-                        .as_ref()
-                        .map(|u| u.input_tokens + u.output_tokens);
-
-                    dispatcher.response_complete(&request_id_owned, status.as_u16(), total_tokens);
-
-                    // Emit block data for frontend consumption
-                    dispatcher.blocks_captured(&exchange);
-                }
-
-                // Feed blocks to engine for processing + persistence.
-                // The engine's own emit_context_updated() is the authoritative signal.
-                if let Some(ref engine) = state_clone.engine {
-                    engine.ingest(
-                        &exchange.provider.to_string(),
-                        &exchange.model,
-                        "proxy",
-                        None,
-                        exchange.request_blocks.clone(),
-                        exchange.response_blocks.clone(),
-                    );
-                }
-
-                debug!(
-                    request_id = %request_id_owned,
-                    upstream_latency_ms,
-                    total_latency_ms = stream_start.elapsed().as_millis() as u64,
-                    bytes_received = exchange.bytes_received,
-                    response_status = status.as_u16(),
-                    "Completed streaming proxy request"
-                );
-            }
-        });
-
-        let body = Body::from_stream(ReceiverStream::new(rx));
-        let mut response = Response::new(body);
-        *response.status_mut() = status;
-        *response.headers_mut() = convert_headers(&headers);
-
-        Ok(response)
+        Ok(handle_streaming_response(
+            state.clone(),
+            request_id.to_string(),
+            upstream_url.to_string(),
+            status,
+            headers,
+            upstream_response,
+            request_start,
+            upstream_latency,
+        ))
     } else {
-        let response_bytes = upstream_response.bytes().await?;
-
-        // Log response body preview only when debug logging is enabled.
-        // Slice raw bytes BEFORE lossy conversion to avoid panicking on
-        // multi-byte char boundaries.
-        if tracing::enabled!(Level::DEBUG) {
-            let preview = if response_bytes.len() > 500 {
-                format!(
-                    "{}... ({} bytes total)",
-                    String::from_utf8_lossy(&response_bytes[..500]),
-                    response_bytes.len()
-                )
-            } else {
-                String::from_utf8_lossy(&response_bytes).to_string()
-            };
-            debug!("Response body: {}", preview);
-        }
-
-        // Capture response
-        if parsed.is_some() {
-            if let Some(exchange) =
-                state
-                    .capture
-                    .capture_response(request_id, status.as_u16(), &response_bytes)
-            {
-                if let Some(ref dispatcher) = state.dispatcher {
-                    let total_tokens = exchange
-                        .usage
-                        .as_ref()
-                        .map(|u| u.input_tokens + u.output_tokens);
-
-                    dispatcher.response_complete(request_id, status.as_u16(), total_tokens);
-
-                    // Emit block data for frontend consumption
-                    dispatcher.blocks_captured(&exchange);
-                }
-
-                // Feed blocks to engine for processing + persistence.
-                // The engine's own emit_context_updated() is the authoritative signal.
-                if let Some(ref engine) = state.engine {
-                    engine.ingest(
-                        &exchange.provider.to_string(),
-                        &exchange.model,
-                        "proxy",
-                        None,
-                        exchange.request_blocks.clone(),
-                        exchange.response_blocks.clone(),
-                    );
-                }
-            }
-        }
-
-        debug!(
-            request_id = %request_id,
-            upstream_latency_ms = upstream_latency.as_millis() as u64,
-            total_latency_ms = request_start.elapsed().as_millis() as u64,
-            response_bytes = response_bytes.len(),
-            response_status = status.as_u16(),
-            "Completed non-streaming proxy request"
-        );
-
-        let mut response = Response::new(Body::from(response_bytes));
-        *response.status_mut() = status;
-        *response.headers_mut() = convert_headers(&headers);
-
-        Ok(response)
+        handle_non_streaming_response(
+            state,
+            request_id,
+            status,
+            &headers,
+            upstream_response,
+            parsed.is_some(),
+            request_start,
+            upstream_latency,
+        )
+        .await
     }
 }
 

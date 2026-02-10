@@ -13,8 +13,7 @@ use uuid::Uuid;
 use error::TerminalError;
 use session::TerminalSession;
 
-/// Default proxy port — must match proxy::DEFAULT_PORT.
-const PROXY_PORT: u16 = 5400;
+use crate::proxy::DEFAULT_PORT as PROXY_PORT;
 const OPENAI_PROXY_ENV_KEYS: [&str; 2] = ["OPENAI_BASE_URL", "OPENAI_API_BASE"];
 
 #[derive(Debug, Default)]

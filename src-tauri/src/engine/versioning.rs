@@ -169,13 +169,7 @@ impl Default for VersionStore {
 }
 
 fn iso_now() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    // Delegate to session's chrono_now equivalent
-    format!("{secs}")
+    crate::util::iso_now()
 }
 
 #[cfg(test)]

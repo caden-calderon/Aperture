@@ -195,12 +195,7 @@ pub fn new_record(
 }
 
 fn iso_now() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    format!("{secs}")
+    crate::util::iso_now()
 }
 
 #[cfg(test)]

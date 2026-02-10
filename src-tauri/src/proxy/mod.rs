@@ -93,15 +93,7 @@ impl ProxyState {
 
     /// Create new proxy state with default configuration (no event dispatch).
     pub fn new() -> Result<Self, ProxyError> {
-        let client = Self::build_client(Self::proxy_client_builder())?;
-        Ok(Self {
-            client,
-            config: UpstreamConfig::default(),
-            capture: CaptureStore::default(),
-            dispatcher: None,
-            hot_patches: Arc::new(HotPatchQueue::new()),
-            engine: None,
-        })
+        Self::with_config(UpstreamConfig::default())
     }
 
     /// Create proxy state with custom upstream configuration.

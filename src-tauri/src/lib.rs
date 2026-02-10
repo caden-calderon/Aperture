@@ -9,6 +9,7 @@ pub mod engine;
 pub mod events;
 pub mod proxy;
 pub mod terminal;
+pub mod util;
 
 use std::env;
 use std::sync::Arc;

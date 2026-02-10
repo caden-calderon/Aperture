@@ -304,64 +304,7 @@ struct OpenAIResponsesUsage {
 // ============================================================================
 
 fn now_iso8601() -> String {
-    // Simple UTC timestamp without chrono dependency
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let duration = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = duration.as_secs();
-
-    // Convert to basic ISO 8601: 2026-02-08T12:00:00Z
-    let days = secs / 86400;
-    let time_secs = secs % 86400;
-    let hours = time_secs / 3600;
-    let minutes = (time_secs % 3600) / 60;
-    let seconds = time_secs % 60;
-
-    // Days since epoch to y/m/d (simplified, good enough for timestamps)
-    let mut y = 1970i64;
-    let mut remaining_days = days as i64;
-    loop {
-        let days_in_year = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) {
-            366
-        } else {
-            365
-        };
-        if remaining_days < days_in_year {
-            break;
-        }
-        remaining_days -= days_in_year;
-        y += 1;
-    }
-    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
-    let month_days = [
-        31,
-        if leap { 29 } else { 28 },
-        31,
-        30,
-        31,
-        30,
-        31,
-        31,
-        30,
-        31,
-        30,
-        31,
-    ];
-    let mut m = 0usize;
-    for (i, &md) in month_days.iter().enumerate() {
-        if remaining_days < md as i64 {
-            m = i;
-            break;
-        }
-        remaining_days -= md as i64;
-    }
-    let d = remaining_days + 1;
-
-    format!(
-        "{y:04}-{:02}-{d:02}T{hours:02}:{minutes:02}:{seconds:02}Z",
-        m + 1
-    )
+    crate::util::iso_now()
 }
 
 /// Estimate token count from text content.

@@ -203,42 +203,8 @@ impl Default for SessionStore {
     }
 }
 
-/// ISO 8601 timestamp for "now" without chrono dependency.
 fn chrono_now() -> String {
-    // Use std::time for a UTC timestamp
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let dur = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = dur.as_secs();
-
-    // Simple ISO 8601 formatting (accurate enough for session timestamps)
-    let days_since_epoch = secs / 86400;
-    let time_of_day = secs % 86400;
-    let hours = time_of_day / 3600;
-    let minutes = (time_of_day % 3600) / 60;
-    let seconds = time_of_day % 60;
-
-    // Calculate year/month/day from days since epoch (1970-01-01)
-    // Using a simplified algorithm
-    let (year, month, day) = days_to_ymd(days_since_epoch as i64);
-
-    format!("{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}Z")
-}
-
-fn days_to_ymd(mut days: i64) -> (i64, u32, u32) {
-    // Civil days from epoch algorithm (Howard Hinnant)
-    days += 719468;
-    let era = if days >= 0 { days } else { days - 146096 } / 146097;
-    let doe = (days - era * 146097) as u32;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    (y, m, d)
+    crate::util::iso_now()
 }
 
 #[cfg(test)]

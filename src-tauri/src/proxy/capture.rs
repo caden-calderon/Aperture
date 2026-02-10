@@ -230,9 +230,7 @@ impl CaptureStore {
             .count();
 
         if completed_count > self.max_retained {
-            // Remove excess completed exchanges (simple FIFO by finding them)
             let to_remove = completed_count - self.max_retained;
-            let mut removed = 0;
             let keys_to_remove: Vec<String> = self
                 .exchanges
                 .iter()
@@ -240,12 +238,8 @@ impl CaptureStore {
                 .take(to_remove)
                 .map(|e| e.key().clone())
                 .collect();
-            for key in keys_to_remove {
-                self.exchanges.remove(&key);
-                removed += 1;
-                if removed >= to_remove {
-                    break;
-                }
+            for key in &keys_to_remove {
+                self.exchanges.remove(key);
             }
         }
     }
