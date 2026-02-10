@@ -1,15 +1,48 @@
 <script lang="ts">
   import type { TokenBudget } from "$lib/types";
 
+  interface ProviderUsageSnapshot {
+    requestId: string;
+    inputTokens: number | null;
+    outputTokens: number | null;
+    totalTokens: number | null;
+    observedAt: number;
+  }
+
   interface Props {
     budget: TokenBudget;
     limit?: number;
+    providerUsage?: ProviderUsageSnapshot | null;
   }
 
-  let { budget, limit = 200000 }: Props = $props();
+  let { budget, limit = 200000, providerUsage = null }: Props = $props();
 
   let percentUsed = $derived(Math.min((budget.used / limit) * 100, 100));
   let freeTokens = $derived(limit - budget.used);
+  let providerTotal = $derived.by(() => {
+    if (!providerUsage) return null;
+    if (providerUsage.totalTokens !== null) return providerUsage.totalTokens;
+    if (providerUsage.inputTokens !== null || providerUsage.outputTokens !== null) {
+      return (providerUsage.inputTokens ?? 0) + (providerUsage.outputTokens ?? 0);
+    }
+    return null;
+  });
+  let providerTitle = $derived.by(() => {
+    if (!providerUsage) return "";
+    const parts: string[] = [];
+    if (providerUsage.totalTokens !== null) {
+      parts.push(`total ${formatNumber(providerUsage.totalTokens)}`);
+    }
+    if (providerUsage.inputTokens !== null) {
+      parts.push(`input ${formatNumber(providerUsage.inputTokens)}`);
+    }
+    if (providerUsage.outputTokens !== null) {
+      parts.push(`output ${formatNumber(providerUsage.outputTokens)}`);
+    }
+    return parts.length > 0
+      ? `Provider-reported usage (latest completed request): ${parts.join(" · ")}`
+      : "Provider-reported usage unavailable for latest request";
+  });
 
   // Pressure states
   let pressureLevel = $derived(
@@ -50,6 +83,13 @@
     <span class="stat stat-percent">
       <span class="stat-value">{percentUsed.toFixed(0)}%</span>
     </span>
+    {#if providerTotal !== null}
+      <span class="stat-sep">•</span>
+      <span class="stat stat-provider" title={providerTitle}>
+        <span class="stat-value">{formatNumber(providerTotal)}</span>
+        <span class="stat-label">provider</span>
+      </span>
+    {/if}
   </div>
 </div>
 
@@ -171,6 +211,15 @@
     font-size: 10px;
     color: var(--text-muted);
     font-weight: 400;
+  }
+
+  .stat-provider .stat-value {
+    color: var(--accent);
+    font-weight: 600;
+  }
+
+  .stat-provider .stat-label {
+    color: var(--text-faint);
   }
 
   [data-pressure="urgent"] .stat-used .stat-value,

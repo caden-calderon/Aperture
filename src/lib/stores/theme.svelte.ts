@@ -483,6 +483,8 @@ function applyColors(colors: ThemeColors, isDark: boolean): void {
   root.style.setProperty('--semantic-warning', colors.semanticWarning);
   root.style.setProperty('--semantic-success', colors.semanticSuccess);
 
+  // Keep native form controls (e.g. select popups) aligned with active theme mode.
+  root.style.colorScheme = isDark ? 'dark' : 'light';
   root.setAttribute('data-theme', isDark ? 'dark' : 'light');
 }
 

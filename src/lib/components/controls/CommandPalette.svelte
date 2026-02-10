@@ -54,7 +54,6 @@
     // Data
     { id: 'snapshot', label: 'Save Snapshot', shortcut: 'S', category: 'Data' },
     { id: 'diff-view', label: 'Compare with Snapshot (Diff)', shortcut: '', category: 'Data' },
-    { id: 'load-demo', label: 'Load Demo Data', shortcut: '', category: 'Data' },
     { id: 'clear-all-blocks', label: 'Clear All Blocks', shortcut: '', category: 'Data' },
   ];
 

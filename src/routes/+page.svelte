@@ -206,7 +206,11 @@
   <!-- Header -->
   <header class="header">
     <div class="header-left">
-      <TokenBudgetBar budget={contextStore.tokenBudget} limit={contextStore.tokenLimit} />
+      <TokenBudgetBar
+        budget={contextStore.tokenBudget}
+        limit={contextStore.tokenLimit}
+        providerUsage={connectionStore.lastProviderUsage}
+      />
     </div>
 
     <div class="header-right">
@@ -232,7 +236,6 @@
         {terminalStore.contextModeLabel}
       </span>
       <ThemeToggle />
-      <button class="btn" onclick={() => contextStore.loadDemoData()}>Demo</button>
       <button class="btn btn-primary" onclick={() => uiStore.toggleCommandPalette()}>
         <span>⌘K</span>
       </button>
@@ -733,6 +736,17 @@
     background: var(--bg-surface);
     border: 1px solid var(--border-default);
     border-radius: 4px;
+    color-scheme: inherit;
+  }
+
+  .session-select option {
+    background: var(--bg-elevated);
+    color: var(--text-primary);
+  }
+
+  .session-select:focus {
+    outline: none;
+    border-color: var(--accent);
   }
 
   .session-select:disabled {

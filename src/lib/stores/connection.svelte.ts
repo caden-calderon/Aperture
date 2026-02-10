@@ -25,6 +25,14 @@ export interface StreamingState {
   provider: ProxyProvider;
 }
 
+export interface ProviderUsageSnapshot {
+  requestId: string;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  totalTokens: number | null;
+  observedAt: number;
+}
+
 // ============================================================================
 // State
 // ============================================================================
@@ -37,6 +45,7 @@ let streaming = $state<StreamingState | null>(null);
 let lastError = $state<string | null>(null);
 let totalRequestsCaptured = $state(0);
 let pendingHotPatches = $state(0);
+let lastProviderUsage = $state<ProviderUsageSnapshot | null>(null);
 let lastActivityTime = $state<number>(0);
 let hasCapturedTraffic = $state(false);
 
@@ -143,6 +152,7 @@ function clearSession(): void {
   activeModel = null;
   activeProvider = "unknown";
   streaming = null;
+  lastProviderUsage = null;
   lastActivityTime = 0;
   hasCapturedTraffic = false;
   pendingHotPatches = 0;
@@ -174,6 +184,17 @@ async function subscribeToEvents(): Promise<void> {
         const data = payload as unknown as BlocksCapturedPayload;
         activeModel = data.model;
         activeProvider = (data.provider as ProxyProvider) ?? "unknown";
+        if (data.input_tokens !== null || data.output_tokens !== null) {
+          const inputTokens = data.input_tokens;
+          const outputTokens = data.output_tokens;
+          lastProviderUsage = {
+            requestId: data.request_id,
+            inputTokens,
+            outputTokens,
+            totalTokens: (inputTokens ?? 0) + (outputTokens ?? 0),
+            observedAt: Date.now(),
+          };
+        }
         markActive();
         break;
       }
@@ -185,6 +206,20 @@ async function subscribeToEvents(): Promise<void> {
       }
 
       case "response_complete":
+        if (typeof payload.tokens_used === "number") {
+          const requestId = typeof payload.request_id === "string" ? payload.request_id : "unknown";
+          const previous =
+            lastProviderUsage && lastProviderUsage.requestId === requestId
+              ? lastProviderUsage
+              : null;
+          lastProviderUsage = {
+            requestId,
+            inputTokens: previous?.inputTokens ?? null,
+            outputTokens: previous?.outputTokens ?? null,
+            totalTokens: payload.tokens_used,
+            observedAt: Date.now(),
+          };
+        }
         streaming = null;
         markActive();
         break;
@@ -295,6 +330,9 @@ export const connectionStore = {
   },
   get pendingHotPatches() {
     return pendingHotPatches;
+  },
+  get lastProviderUsage() {
+    return lastProviderUsage;
   },
 
   connect,
