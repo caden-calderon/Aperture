@@ -1,7 +1,9 @@
 <script lang="ts">
   import { contextStore, zonesStore, connectionStore } from "$lib/stores";
+  import SettingsPanel from "$lib/components/settings/SettingsPanel.svelte";
 
   let showStatus = $state(false);
+  let showSettings = $state(false);
 
   function formatNumber(n: number): string {
     return n.toLocaleString();
@@ -52,6 +54,16 @@
     </div>
 
     <div class="titlebar-right">
+      <button
+        class="window-btn"
+        onclick={() => showSettings = !showSettings}
+        title="Settings"
+        class:active={showSettings}
+      >
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/>
+        </svg>
+      </button>
       <button class="window-btn" onclick={minimize} title="Minimize">
         <svg width="10" height="10" viewBox="0 0 10 10">
           <rect x="0" y="4" width="10" height="2" fill="currentColor"/>
@@ -110,6 +122,8 @@
   {/if}
 </div>
 
+<SettingsPanel open={showSettings} onclose={() => showSettings = false} />
+
 <style>
   .titlebar-wrapper {
     flex-shrink: 0;
@@ -134,7 +148,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    width: 100px;
+    width: 130px;
   }
 
   .titlebar-right {
@@ -296,7 +310,8 @@
     transition: all 0.1s ease;
   }
 
-  .window-btn:hover {
+  .window-btn:hover,
+  .window-btn.active {
     background: var(--bg-hover);
     color: var(--text-primary);
   }

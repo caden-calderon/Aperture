@@ -210,6 +210,7 @@
         budget={contextStore.tokenBudget}
         limit={contextStore.tokenLimit}
         providerUsage={connectionStore.lastProviderUsage}
+        budgetCeiling={contextStore.budgetCeiling}
       />
     </div>
 

@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { TokenBudget } from "$lib/types";
+  import { plannerThresholdsFromCeilingFraction } from "$lib/utils/planner-thresholds";
 
   interface ProviderUsageSnapshot {
     requestId: string;
@@ -13,9 +14,11 @@
     budget: TokenBudget;
     limit?: number;
     providerUsage?: ProviderUsageSnapshot | null;
+    budgetCeiling?: number;
   }
 
-  let { budget, limit = 200000, providerUsage = null }: Props = $props();
+  let { budget, limit = 200000, providerUsage = null, budgetCeiling = 0.80 }: Props = $props();
+  let plannerThresholds = $derived(plannerThresholdsFromCeilingFraction(budgetCeiling));
 
   let percentUsed = $derived(Math.min((budget.used / limit) * 100, 100));
   let freeTokens = $derived(limit - budget.used);
@@ -68,6 +71,26 @@
       <div class="marker" style:left="60%"></div>
       <div class="marker" style:left="80%"></div>
       <div class="marker marker-danger" style:left="90%"></div>
+      <div
+        class="marker marker-threshold marker-soft"
+        style:left="{plannerThresholds.soft * 100}%"
+        title="Soft threshold: {(plannerThresholds.soft * 100).toFixed(0)}%"
+      ></div>
+      <div
+        class="marker marker-threshold marker-medium"
+        style:left="{plannerThresholds.medium * 100}%"
+        title="Medium threshold: {(plannerThresholds.medium * 100).toFixed(0)}%"
+      ></div>
+      <div
+        class="marker marker-threshold marker-hard"
+        style:left="{plannerThresholds.hard * 100}%"
+        title="Hard threshold: {(plannerThresholds.hard * 100).toFixed(0)}%"
+      ></div>
+      <div
+        class="marker marker-ceiling"
+        style:left="{plannerThresholds.ceiling * 100}%"
+        title="Budget ceiling: {(plannerThresholds.ceiling * 100).toFixed(0)}%"
+      ></div>
     </div>
   </div>
   <div class="budget-stats">
@@ -147,6 +170,31 @@
   .marker-danger {
     background: var(--semantic-danger);
     opacity: 0.4;
+  }
+
+  .marker-threshold {
+    width: 1px;
+    opacity: 0.3;
+    border-style: dotted;
+  }
+
+  .marker-soft {
+    background: var(--zone-middle);
+  }
+
+  .marker-medium {
+    background: var(--semantic-warning);
+  }
+
+  .marker-hard {
+    background: var(--semantic-danger);
+  }
+
+  .marker-ceiling {
+    width: 2px;
+    background: var(--accent);
+    opacity: 0.7;
+    z-index: 1;
   }
 
   /* Pressure colors */

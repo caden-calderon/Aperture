@@ -7,6 +7,7 @@
 
 pub mod engine;
 pub mod events;
+pub mod metacog;
 pub mod proxy;
 pub mod terminal;
 pub mod util;
@@ -279,6 +280,35 @@ fn engine_compress_block(
     Ok(serde_json::to_string(&decision).unwrap_or_default())
 }
 
+/// Tauri command: Set the planner budget ceiling (0.40–1.0).
+#[tauri::command]
+fn engine_set_budget_ceiling(state: tauri::State<'_, Arc<ContextEngine>>, ceiling: f64) {
+    state.planner.set_budget_ceiling(ceiling);
+}
+
+/// Tauri command: Get the current effective budget ceiling.
+#[tauri::command]
+fn engine_get_budget_ceiling(state: tauri::State<'_, Arc<ContextEngine>>) -> f64 {
+    state.planner.effective_budget_ceiling()
+}
+
+/// Tauri command: Get sidekick compression settings.
+#[tauri::command]
+fn engine_get_compression_settings(
+    state: tauri::State<'_, Arc<ContextEngine>>,
+) -> engine::compression::CompressionSettings {
+    state.compression_settings()
+}
+
+/// Tauri command: Update sidekick compression settings.
+#[tauri::command]
+fn engine_update_compression_settings(
+    state: tauri::State<'_, Arc<ContextEngine>>,
+    settings: engine::compression::CompressionSettings,
+) {
+    state.set_compression_settings(settings);
+}
+
 /// Parse a zone string into a Zone enum.
 fn parse_zone(zone: &str) -> engine::types::Zone {
     use engine::types::{BuiltInZone, Zone};
@@ -388,6 +418,10 @@ pub fn run() {
             engine_compress_block,
             engine_switch_session,
             engine_undo_block,
+            engine_set_budget_ceiling,
+            engine_get_budget_ceiling,
+            engine_get_compression_settings,
+            engine_update_compression_settings,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

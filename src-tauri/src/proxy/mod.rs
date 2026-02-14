@@ -6,11 +6,14 @@
 //! responses back to clients.
 
 pub mod capture;
+pub mod context_api;
 pub mod error;
 pub mod handler;
 pub mod hot_patch;
+pub mod interceptor;
 pub mod parser;
 pub mod provider_adapter;
+pub mod rewriter;
 
 use axum::{routing::any, Router};
 use reqwest::Client;

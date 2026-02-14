@@ -26,6 +26,10 @@ use crate::engine::template::{Template, TemplateManager};
 
 **Integration point:** Phase 7 adds intelligence via local and API models.
 
+**Dependency note from Phase 3:**
+- Phase 3 introduces a compression-scoped backend interface/config path.
+- Phase 7 generalizes that interface into a shared sidecar runtime for multiple task classes.
+
 ---
 
 ## Problem Statement
@@ -58,13 +62,14 @@ Aperture Engine
 
 Never blocks proxy or UI. Results available on next request.
 
-### 2. Model Backend Abstraction
+### 2. Model Backend Abstraction (Generalized from Phase 3)
 
 Support multiple model providers:
 - **Ollama** — Easy local model management
 - **llama.cpp** — Direct inference (optional)
 - **Anthropic API** — Haiku for mid-tier tasks
 - **OpenAI API** — GPT-4 mini for mid-tier tasks
+- **OpenRouter API** — Optional third-party model routing
 
 ```rust
 pub trait ModelBackend: Send + Sync {

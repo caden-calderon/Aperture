@@ -35,6 +35,14 @@ pub async fn proxy_handler(
     info!("--> {} {}", method, path);
     log_headers("Request", req.headers());
 
+    // Internal API routes — handled locally, never forwarded upstream.
+    if path.starts_with("/_aperture/") || path == "/_aperture" {
+        return super::context_api::handle_aperture_route(&state, &path, req)
+            .await
+            .unwrap_or_else(|| (StatusCode::NOT_FOUND, "Unknown aperture route").into_response())
+            .into_response();
+    }
+
     let upstream = determine_upstream(&state.config, req.headers(), &path);
     let upstream_url = build_upstream_url(upstream.url, &path, uri.query(), upstream.is_chatgpt);
 
@@ -378,6 +386,9 @@ fn handle_streaming_response(
 }
 
 /// Handle a non-streaming response: read body, capture, emit events.
+///
+/// If context tool calls are detected and the engine is available, attempts
+/// interception (dispatch + optional re-invoke) before returning to the client.
 #[allow(clippy::too_many_arguments)]
 async fn handle_non_streaming_response(
     state: &Arc<ProxyState>,
@@ -388,6 +399,10 @@ async fn handle_non_streaming_response(
     request_was_captured: bool,
     request_start: Instant,
     upstream_latency: Duration,
+    parsed: Option<&super::parser::ParsedRequest>,
+    original_request_body: &[u8],
+    upstream_url: &str,
+    original_request_headers: &HeaderMap,
 ) -> Result<Response, ProxyError> {
     let response_bytes = upstream_response.bytes().await?;
 
@@ -404,6 +419,58 @@ async fn handle_non_streaming_response(
             String::from_utf8_lossy(&response_bytes).to_string()
         };
         debug!("Response body: {}", preview);
+    }
+
+    // Attempt context tool interception on successful responses
+    if status.is_success() {
+        if let (Some(parsed), Some(ref engine)) = (parsed, &state.engine) {
+            if !parsed.stream {
+                let uri_path = upstream_url
+                    .find("://")
+                    .and_then(|i| upstream_url[i + 3..].find('/'))
+                    .map(|i| &upstream_url[upstream_url.find("://").unwrap() + 3 + i..])
+                    .unwrap_or("/");
+
+                if let Some(result) = super::interceptor::try_context_tool_interception(
+                    state,
+                    request_id,
+                    uri_path,
+                    parsed,
+                    engine,
+                    &response_bytes,
+                    original_request_body,
+                    upstream_url,
+                    original_request_headers,
+                    request_start,
+                )
+                .await
+                {
+                    let super::interceptor::InterceptionResult::ModifiedResponse(body) = result;
+
+                    // Capture the effective response body the client receives.
+                    if request_was_captured {
+                        if let Some(exchange) =
+                            state
+                                .capture
+                                .capture_response(request_id, status.as_u16(), &body)
+                        {
+                            finalize_exchange(state, request_id, status.as_u16(), &exchange);
+                        }
+                    }
+
+                    debug!(
+                        request_id = %request_id,
+                        "Returning intercepted response ({} bytes)",
+                        body.len()
+                    );
+
+                    let mut response = Response::new(Body::from(body));
+                    *response.status_mut() = status;
+                    *response.headers_mut() = convert_headers(headers);
+                    return Ok(response);
+                }
+            }
+        }
     }
 
     if request_was_captured {
@@ -501,7 +568,8 @@ async fn forward_request(
         debug!("Request body: {}", preview);
     }
 
-    // Apply hot patches BEFORE capture so blocks reflect patched content.
+    // Apply hot patches before rewriting/capture so downstream parsing sees
+    // effective request semantics.
     // peek_all() keeps patches persistent — LLM tools re-send their own
     // conversation history, so patches must re-apply on every request until
     // the user explicitly clears them via clear_hot_patches.
@@ -522,9 +590,47 @@ async fn forward_request(
         (body_bytes.clone(), false)
     };
 
-    // Capture from decompressed (and possibly patched) body so blocks parse correctly.
+    // Apply context mutations (planner rewriting, tool cleanup, manifest injection).
+    // Shadows forwarded_body with the rewritten payload if changes were made.
+    // Fail-open: if rewriting fails for any reason, forward the original body.
+    let rewrite_input = if body_was_patched {
+        forwarded_body.as_ref()
+    } else {
+        body_for_processing
+    };
+    let parsed_for_rewrite = if capture_supported {
+        super::parser::parse_request(path, rewrite_input).ok()
+    } else {
+        None
+    };
+
+    let (forwarded_body, body_was_patched) = if let Some(ref engine) = state.engine {
+        if let Some(ref parsed) = parsed_for_rewrite {
+            match super::rewriter::rewrite_request(rewrite_input, path, parsed, engine) {
+                Ok(Some(rewritten)) => {
+                    debug!(
+                        "Context rewriting applied ({} -> {} bytes)",
+                        rewrite_input.len(),
+                        rewritten.len()
+                    );
+                    (rewritten, true)
+                }
+                Ok(None) => (forwarded_body, body_was_patched),
+                Err(e) => {
+                    debug!("Context rewriting skipped, forwarding original: {e}");
+                    (forwarded_body, body_was_patched)
+                }
+            }
+        } else {
+            (forwarded_body, body_was_patched)
+        }
+    } else {
+        (forwarded_body, body_was_patched)
+    };
+
+    // Capture from the effective body semantics (post-rewrite if rewritten).
     let capture_body = if body_was_patched {
-        &forwarded_body
+        forwarded_body.as_ref()
     } else {
         body_for_processing
     };
@@ -578,7 +684,8 @@ async fn forward_request(
         );
     }
 
-    // Send request upstream
+    // Send request upstream (keep a copy for potential re-invoke in interceptor)
+    let forwarded_body_for_intercept = forwarded_body.clone();
     let upstream_send_start = Instant::now();
     let upstream_response = upstream_req
         .body(forwarded_body)
@@ -625,6 +732,10 @@ async fn forward_request(
             parsed.is_some(),
             request_start,
             upstream_latency,
+            parsed.as_ref(),
+            &forwarded_body_for_intercept,
+            upstream_url,
+            &parts.headers,
         )
         .await
     }

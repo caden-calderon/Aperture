@@ -98,6 +98,8 @@ pub struct ParsedRequest {
     pub blocks: Vec<Block>,
     /// System prompt extracted from request (Anthropic top-level `system` field).
     pub system_prompt: Option<String>,
+    /// Whether the request asks for streaming (`"stream": true`).
+    pub stream: bool,
 }
 
 /// Result of parsing a response body.
@@ -376,8 +378,12 @@ fn default_zone_for_role(role: Role) -> Zone {
 
 /// Parse an Anthropic Messages API request body into blocks.
 pub fn parse_anthropic_request(body: &[u8]) -> Result<ParsedRequest, String> {
-    let req: AnthropicRequest =
+    let raw: serde_json::Value =
         serde_json::from_slice(body).map_err(|e| format!("Invalid Anthropic request JSON: {e}"))?;
+    let stream = raw.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    let req: AnthropicRequest = serde_json::from_value(raw)
+        .map_err(|e| format!("Invalid Anthropic request structure: {e}"))?;
 
     let provider_str = "anthropic";
     let mut blocks = Vec::new();
@@ -414,6 +420,7 @@ pub fn parse_anthropic_request(body: &[u8]) -> Result<ParsedRequest, String> {
         model: req.model,
         blocks,
         system_prompt,
+        stream,
     })
 }
 
@@ -604,8 +611,12 @@ pub fn parse_anthropic_response(body: &[u8]) -> Result<ParsedResponse, String> {
 
 /// Parse an OpenAI Chat Completions request body into blocks.
 pub fn parse_openai_chat_request(body: &[u8]) -> Result<ParsedRequest, String> {
-    let req: OpenAIChatRequest = serde_json::from_slice(body)
+    let raw: serde_json::Value = serde_json::from_slice(body)
         .map_err(|e| format!("Invalid OpenAI chat request JSON: {e}"))?;
+    let stream = raw.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    let req: OpenAIChatRequest = serde_json::from_value(raw)
+        .map_err(|e| format!("Invalid OpenAI chat request structure: {e}"))?;
 
     let provider_str = "openai";
     let mut blocks = Vec::new();
@@ -621,6 +632,7 @@ pub fn parse_openai_chat_request(body: &[u8]) -> Result<ParsedRequest, String> {
         model: req.model,
         blocks,
         system_prompt: None, // OpenAI system prompt is in messages array
+        stream,
     })
 }
 
@@ -757,8 +769,12 @@ pub fn parse_openai_chat_response(body: &[u8]) -> Result<ParsedResponse, String>
 
 /// Parse an OpenAI Responses API request body into blocks.
 pub fn parse_openai_responses_request(body: &[u8]) -> Result<ParsedRequest, String> {
-    let req: OpenAIResponsesRequest = serde_json::from_slice(body)
+    let raw: serde_json::Value = serde_json::from_slice(body)
         .map_err(|e| format!("Invalid OpenAI responses request JSON: {e}"))?;
+    let stream = raw.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    let req: OpenAIResponsesRequest = serde_json::from_value(raw)
+        .map_err(|e| format!("Invalid OpenAI responses request structure: {e}"))?;
 
     let provider_str = "openai";
     let mut blocks = Vec::new();
@@ -838,6 +854,7 @@ pub fn parse_openai_responses_request(body: &[u8]) -> Result<ParsedRequest, Stri
         model: req.model,
         blocks,
         system_prompt: req.instructions,
+        stream,
     })
 }
 
@@ -1579,5 +1596,84 @@ mod tests {
         assert_eq!(result.blocks.len(), 1);
         assert_eq!(result.blocks[0].role, Role::Thinking);
         assert_eq!(result.blocks[0].content, "Deep analysis here...");
+    }
+
+    // --- Stream field extraction ---
+
+    #[test]
+    fn test_parse_anthropic_stream_true() {
+        let body = serde_json::json!({
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 1024,
+            "stream": true,
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+        let result = parse_anthropic_request(&serde_json::to_vec(&body).unwrap()).unwrap();
+        assert!(result.stream);
+    }
+
+    #[test]
+    fn test_parse_anthropic_stream_false() {
+        let body = serde_json::json!({
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 1024,
+            "stream": false,
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+        let result = parse_anthropic_request(&serde_json::to_vec(&body).unwrap()).unwrap();
+        assert!(!result.stream);
+    }
+
+    #[test]
+    fn test_parse_anthropic_stream_absent() {
+        let body = serde_json::json!({
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+        let result = parse_anthropic_request(&serde_json::to_vec(&body).unwrap()).unwrap();
+        assert!(!result.stream);
+    }
+
+    #[test]
+    fn test_parse_openai_chat_stream_true() {
+        let body = serde_json::json!({
+            "model": "gpt-4",
+            "stream": true,
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+        let result = parse_openai_chat_request(&serde_json::to_vec(&body).unwrap()).unwrap();
+        assert!(result.stream);
+    }
+
+    #[test]
+    fn test_parse_openai_chat_stream_absent() {
+        let body = serde_json::json!({
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+        let result = parse_openai_chat_request(&serde_json::to_vec(&body).unwrap()).unwrap();
+        assert!(!result.stream);
+    }
+
+    #[test]
+    fn test_parse_openai_responses_stream_true() {
+        let body = serde_json::json!({
+            "model": "gpt-4",
+            "stream": true,
+            "input": "Hello"
+        });
+        let result = parse_openai_responses_request(&serde_json::to_vec(&body).unwrap()).unwrap();
+        assert!(result.stream);
+    }
+
+    #[test]
+    fn test_parse_openai_responses_stream_absent() {
+        let body = serde_json::json!({
+            "model": "gpt-4",
+            "input": "Hello"
+        });
+        let result = parse_openai_responses_request(&serde_json::to_vec(&body).unwrap()).unwrap();
+        assert!(!result.stream);
     }
 }

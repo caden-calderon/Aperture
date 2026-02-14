@@ -130,6 +130,26 @@ export interface TokenBudget {
 }
 
 // ============================================================================
+// Compression Settings (Phase 4)
+// ============================================================================
+
+export type CompressionBackendKind =
+  | "auto"
+  | "disabled"
+  | "anthropic"
+  | "open_ai"
+  | "open_router";
+
+export interface CompressionSettings {
+  backend: CompressionBackendKind;
+  model: string | null;
+  timeoutMs: number;
+  maxTokens: number;
+  openrouterBaseUrl: string | null;
+  openrouterApiKeyEnv: string | null;
+}
+
+// ============================================================================
 // Rule Types
 // ============================================================================
 

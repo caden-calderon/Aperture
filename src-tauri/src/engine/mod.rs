@@ -7,8 +7,10 @@
 pub mod action_log;
 pub mod block;
 pub mod budget;
+pub mod compression;
 pub mod dependency;
 pub mod pipeline;
+pub mod planner;
 pub mod policy;
 pub mod session;
 pub mod staleness;
@@ -21,13 +23,16 @@ pub mod zone;
 
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
+use std::sync::Mutex;
 use tracing::{debug, info, warn};
 
 use self::action_log::{ActionActor, ActionKind, ActionLog, ActionRecord};
 use self::block::Block;
 use self::budget::{BudgetConfig, BudgetStatus};
+use self::compression::CompressionSettings;
 use self::dependency::{build_dependencies, DependencyEdge, DependencyGraph};
 use self::pipeline::{classify, ClassificationResult, PipelineConfig};
+use self::planner::ContextPlanner;
 use self::policy::{PolicyDecision, PolicyEngine, ProposedAction};
 use self::session::{SessionInfo, SessionStore};
 use self::storage::SqliteStorage;
@@ -46,6 +51,8 @@ pub struct ContextEngine {
     pub dependencies: DependencyGraph,
     pub action_log: ActionLog,
     pub policy: PolicyEngine,
+    pub planner: ContextPlanner,
+    compression_settings: Mutex<CompressionSettings>,
     session_identity_index: DashMap<String, String>,
     pipeline_config: PipelineConfig,
     dispatcher: Option<DynDispatcher>,
@@ -85,6 +92,8 @@ impl ContextEngine {
             dependencies: DependencyGraph::new(),
             action_log: ActionLog::new(),
             policy: PolicyEngine::new(),
+            planner: ContextPlanner::with_default_config(),
+            compression_settings: Mutex::new(CompressionSettings::default()),
             session_identity_index: DashMap::new(),
             pipeline_config: PipelineConfig::default(),
             dispatcher,
@@ -101,6 +110,8 @@ impl ContextEngine {
             dependencies: DependencyGraph::new(),
             action_log: ActionLog::new(),
             policy: PolicyEngine::new(),
+            planner: ContextPlanner::with_default_config(),
+            compression_settings: Mutex::new(CompressionSettings::default()),
             session_identity_index: DashMap::new(),
             pipeline_config: PipelineConfig::default(),
             dispatcher,
@@ -291,6 +302,24 @@ impl ContextEngine {
             None => (self.store.total_tokens(), 200_000),
         };
         budget::budget_status(used, limit, &BudgetConfig::default())
+    }
+
+    /// Current sidekick compression settings.
+    pub fn compression_settings(&self) -> CompressionSettings {
+        self.compression_settings
+            .lock()
+            .expect("compression_settings lock")
+            .clone()
+    }
+
+    /// Update sidekick compression settings.
+    pub fn set_compression_settings(&self, settings: CompressionSettings) {
+        let normalized = settings.normalized();
+        let mut guard = self
+            .compression_settings
+            .lock()
+            .expect("compression_settings lock");
+        *guard = normalized;
     }
 
     /// Version history for a block.
@@ -748,6 +777,130 @@ impl ContextEngine {
         Ok(())
     }
 
+    // ── System-Driven Block Mutations ─────────────────────────
+    // These bypass policy checks — used by the planner/rewriter for
+    // engine-side updates (zone shifts, pin toggles) that are system-driven.
+
+    /// Move a block to a different zone (system-driven, no policy check).
+    pub fn move_block_internal(&self, block_id: &str, target_zone: Zone) {
+        let Some(block) = self.store.get(block_id) else {
+            return;
+        };
+        if block.zone == target_zone {
+            return;
+        }
+        self.store.update(block_id, |b| {
+            b.zone = target_zone.clone();
+        });
+    }
+
+    /// Set pin state on a block (system-driven, no policy check).
+    pub fn set_pin_internal(&self, block_id: &str, position: Option<PinPosition>) {
+        let Some(block) = self.store.get(block_id) else {
+            return;
+        };
+        if block.pinned == position {
+            return;
+        }
+        self.store.update(block_id, |b| {
+            b.pinned = position;
+        });
+    }
+
+    /// Archive a block (system-driven, no policy check).
+    pub fn archive_block_internal(&self, block_id: &str) {
+        if !self.store.contains(block_id) {
+            return;
+        }
+        self.store.remove(block_id);
+        self.dependencies.remove_block(block_id);
+        self.versions.remove(block_id);
+        self.refresh_active_session_totals();
+    }
+
+    /// Apply a model-authored compression summary to a block.
+    pub fn apply_compression_summary_internal(&self, block_id: &str, summary: &str) {
+        let Some(block) = self.store.get(block_id) else {
+            return;
+        };
+        if block.content == summary && block.compression_level == CompressionLevel::Summarized {
+            return;
+        }
+
+        let token_model = self
+            .sessions
+            .active()
+            .map(|s| s.model)
+            .unwrap_or_else(|| "unknown".to_string());
+        let summary_tokens = count_tokens(summary, &token_model);
+        let summary_content = summary.to_string();
+
+        self.store.update(block_id, |b| {
+            b.content = summary_content.clone();
+            b.tokens = summary_tokens;
+            b.compression_level = CompressionLevel::Summarized;
+            b.compressed_versions.summarized = Some(block::CompressionVersion {
+                content: summary_content.clone(),
+                tokens: summary_tokens,
+            });
+        });
+        self.refresh_active_session_totals();
+    }
+
+    /// Restore a compressed block back to its original content.
+    pub fn restore_original_internal(&self, block_id: &str) {
+        let Some(block) = self.store.get(block_id) else {
+            return;
+        };
+        if block.compression_level == CompressionLevel::Original
+            && block.content == block.compressed_versions.original.content
+        {
+            return;
+        }
+
+        let original_content = block.compressed_versions.original.content;
+        let original_tokens = block.compressed_versions.original.tokens;
+        self.store.update(block_id, |b| {
+            b.content = original_content.clone();
+            b.tokens = original_tokens;
+            b.compression_level = CompressionLevel::Original;
+        });
+        self.refresh_active_session_totals();
+    }
+
+    /// Update block content to reflect file mutations from real tool traffic.
+    pub fn update_content_internal(&self, block_id: &str, new_content: &str) {
+        let Some(block) = self.store.get(block_id) else {
+            return;
+        };
+        if block.content == new_content && block.compressed_versions.original.content == new_content
+        {
+            return;
+        }
+
+        let token_model = self
+            .sessions
+            .active()
+            .map(|s| s.model)
+            .unwrap_or_else(|| "unknown".to_string());
+        let new_tokens = count_tokens(new_content, &token_model);
+        let new_content_owned = new_content.to_string();
+
+        self.store.update(block_id, |b| {
+            b.content = new_content_owned.clone();
+            b.tokens = new_tokens;
+            b.compression_level = CompressionLevel::Original;
+            b.compressed_versions.original = block::CompressionVersion {
+                content: new_content_owned.clone(),
+                tokens: new_tokens,
+            };
+            b.compressed_versions.trimmed = None;
+            b.compressed_versions.summarized = None;
+            b.compressed_versions.minimal = None;
+        });
+        self.refresh_active_session_totals();
+    }
+
     // ── Internal Helpers ─────────────────────────────────────
 
     /// Ensure a session exists for this provider/model combo,
@@ -860,6 +1013,7 @@ impl Default for ContextEngine {
 mod tests {
     use super::*;
     use block::{BlockMetadata, CompressionVersion, CompressionVersions};
+    use compression::CompressionBackendKind;
     use types::{BuiltInZone, CompressionLevel, PinPosition, Role, Zone};
 
     fn make_block(id: &str, role: Role, content: &str) -> Block {
@@ -1007,7 +1161,9 @@ mod tests {
             response_blocks,
         );
 
-        let latest = engine.block("latest-assistant").expect("response block exists");
+        let latest = engine
+            .block("latest-assistant")
+            .expect("response block exists");
         assert_eq!(
             latest.metadata.turn_index, 6,
             "Response block should be shifted to latest request turn + 1"
@@ -1380,5 +1536,258 @@ mod tests {
             .expect("confirmed bulk remove should succeed");
         assert!(matches!(second, PolicyDecision::Allow));
         assert_eq!(engine.store.count(), 0);
+    }
+
+    // ── System-driven block mutation tests ────────────────
+
+    #[test]
+    fn test_move_block_internal_changes_zone() {
+        let engine = ContextEngine::new_in_memory(None);
+
+        engine.ingest(
+            "anthropic",
+            "claude-sonnet",
+            "proxy",
+            None,
+            vec![make_block("u1", Role::User, "hello")],
+            vec![],
+        );
+
+        // Initially in Recency (assigned by ingest zone logic)
+        let original_zone = engine.block("u1").unwrap().zone;
+
+        engine.move_block_internal("u1", Zone::BuiltIn(BuiltInZone::Primacy));
+        let updated = engine.block("u1").unwrap();
+        assert_eq!(updated.zone, Zone::BuiltIn(BuiltInZone::Primacy));
+        assert_ne!(updated.zone, original_zone);
+    }
+
+    #[test]
+    fn test_move_block_internal_noop_same_zone() {
+        let engine = ContextEngine::new_in_memory(None);
+
+        engine.ingest(
+            "anthropic",
+            "claude-sonnet",
+            "proxy",
+            None,
+            vec![make_block("u1", Role::User, "hello")],
+            vec![],
+        );
+
+        let zone = engine.block("u1").unwrap().zone;
+        // Moving to the same zone should be a no-op
+        engine.move_block_internal("u1", zone.clone());
+        assert_eq!(engine.block("u1").unwrap().zone, zone);
+    }
+
+    #[test]
+    fn test_move_block_internal_unknown_id_ignored() {
+        let engine = ContextEngine::new_in_memory(None);
+        // Should not panic
+        engine.move_block_internal("nonexistent", Zone::BuiltIn(BuiltInZone::Primacy));
+    }
+
+    #[test]
+    fn test_set_pin_internal_pins_block() {
+        let engine = ContextEngine::new_in_memory(None);
+
+        engine.ingest(
+            "anthropic",
+            "claude-sonnet",
+            "proxy",
+            None,
+            vec![make_block("u1", Role::User, "hello")],
+            vec![],
+        );
+
+        assert!(engine.block("u1").unwrap().pinned.is_none());
+        engine.set_pin_internal("u1", Some(PinPosition::Top));
+        assert_eq!(engine.block("u1").unwrap().pinned, Some(PinPosition::Top));
+    }
+
+    #[test]
+    fn test_set_pin_internal_unpins_block() {
+        let engine = ContextEngine::new_in_memory(None);
+
+        engine.ingest(
+            "anthropic",
+            "claude-sonnet",
+            "proxy",
+            None,
+            vec![make_block("u1", Role::User, "hello")],
+            vec![],
+        );
+
+        engine.set_pin_internal("u1", Some(PinPosition::Top));
+        assert_eq!(engine.block("u1").unwrap().pinned, Some(PinPosition::Top));
+
+        engine.set_pin_internal("u1", None);
+        assert!(engine.block("u1").unwrap().pinned.is_none());
+    }
+
+    #[test]
+    fn test_set_pin_internal_unknown_id_ignored() {
+        let engine = ContextEngine::new_in_memory(None);
+        engine.set_pin_internal("nonexistent", Some(PinPosition::Top));
+    }
+
+    #[test]
+    fn test_internal_mutations_visible_in_session_blocks() {
+        let engine = ContextEngine::new_in_memory(None);
+
+        engine.ingest(
+            "anthropic",
+            "claude-sonnet",
+            "proxy",
+            None,
+            vec![
+                make_block("u1", Role::User, "hello"),
+                make_block("u2", Role::User, "world"),
+            ],
+            vec![],
+        );
+
+        engine.move_block_internal("u1", Zone::BuiltIn(BuiltInZone::Primacy));
+        engine.set_pin_internal("u2", Some(PinPosition::Top));
+
+        let blocks = engine.active_session_blocks();
+        let u1 = blocks.iter().find(|b| b.id == "u1").unwrap();
+        let u2 = blocks.iter().find(|b| b.id == "u2").unwrap();
+        assert_eq!(u1.zone, Zone::BuiltIn(BuiltInZone::Primacy));
+        assert_eq!(u2.pinned, Some(PinPosition::Top));
+    }
+
+    #[test]
+    fn test_archive_block_internal_removes_block_and_updates_totals() {
+        let engine = ContextEngine::new_in_memory(None);
+        engine.ingest(
+            "openai",
+            "gpt-4.1",
+            "proxy",
+            None,
+            vec![
+                make_block("u1", Role::User, "alpha"),
+                make_block("u2", Role::User, "beta"),
+            ],
+            vec![],
+        );
+
+        let before = engine.active_session().expect("active session");
+        assert_eq!(before.block_count, 2);
+        engine.archive_block_internal("u1");
+
+        assert!(engine.block("u1").is_none());
+        let after = engine.active_session().expect("active session");
+        assert_eq!(after.block_count, 1);
+        assert_eq!(after.total_tokens, engine.store.total_tokens());
+    }
+
+    #[test]
+    fn test_apply_compression_summary_internal_updates_block_state() {
+        let engine = ContextEngine::new_in_memory(None);
+        engine.ingest(
+            "openai",
+            "gpt-4.1",
+            "proxy",
+            None,
+            vec![make_block(
+                "u1",
+                Role::User,
+                "long original content for compression testing",
+            )],
+            vec![],
+        );
+
+        engine.apply_compression_summary_internal("u1", "short summary");
+        let block = engine.block("u1").expect("block exists");
+        assert_eq!(block.content, "short summary");
+        assert_eq!(block.compression_level, CompressionLevel::Summarized);
+        assert_eq!(
+            block
+                .compressed_versions
+                .summarized
+                .as_ref()
+                .map(|v| v.content.as_str()),
+            Some("short summary")
+        );
+    }
+
+    #[test]
+    fn test_restore_original_internal_rehydrates_original_content() {
+        let engine = ContextEngine::new_in_memory(None);
+        engine.ingest(
+            "openai",
+            "gpt-4.1",
+            "proxy",
+            None,
+            vec![make_block("u1", Role::User, "original content")],
+            vec![],
+        );
+
+        engine.apply_compression_summary_internal("u1", "compressed");
+        engine.restore_original_internal("u1");
+
+        let block = engine.block("u1").expect("block exists");
+        assert_eq!(block.content, "original content");
+        assert_eq!(block.compression_level, CompressionLevel::Original);
+    }
+
+    #[test]
+    fn test_update_content_internal_resets_compression_versions() {
+        let engine = ContextEngine::new_in_memory(None);
+        engine.ingest(
+            "openai",
+            "gpt-4.1",
+            "proxy",
+            None,
+            vec![make_block("u1", Role::User, "old content")],
+            vec![],
+        );
+
+        engine.apply_compression_summary_internal("u1", "old summary");
+        engine.update_content_internal("u1", "new canonical content");
+
+        let block = engine.block("u1").expect("block exists");
+        assert_eq!(block.content, "new canonical content");
+        assert_eq!(block.compression_level, CompressionLevel::Original);
+        assert_eq!(
+            block.compressed_versions.original.content,
+            "new canonical content"
+        );
+        assert!(block.compressed_versions.summarized.is_none());
+    }
+
+    #[test]
+    fn test_compression_settings_default_available_from_engine() {
+        let engine = ContextEngine::new_in_memory(None);
+        let settings = engine.compression_settings();
+        assert_eq!(settings.backend, CompressionBackendKind::Auto);
+        assert_eq!(settings.timeout_ms, 12_000);
+        assert_eq!(settings.max_tokens, 512);
+    }
+
+    #[test]
+    fn test_set_compression_settings_normalizes_values() {
+        let engine = ContextEngine::new_in_memory(None);
+        engine.set_compression_settings(compression::CompressionSettings {
+            backend: CompressionBackendKind::OpenRouter,
+            model: Some("  custom-model  ".to_string()),
+            timeout_ms: 100,
+            max_tokens: 40_000,
+            openrouter_base_url: Some(" https://openrouter.ai/api/v1 ".to_string()),
+            openrouter_api_key_env: Some("   ".to_string()),
+        });
+
+        let settings = engine.compression_settings();
+        assert_eq!(settings.backend, CompressionBackendKind::OpenRouter);
+        assert_eq!(settings.model.as_deref(), Some("custom-model"));
+        assert_eq!(settings.timeout_ms, 500);
+        assert_eq!(settings.max_tokens, 8_192);
+        assert_eq!(
+            settings.openrouter_base_url.as_deref(),
+            Some("https://openrouter.ai/api/v1")
+        );
+        assert!(settings.openrouter_api_key_env.is_none());
     }
 }

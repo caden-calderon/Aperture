@@ -192,6 +192,7 @@
   class:dragging
   class:collapsed={isCollapsed}
   class:pinned={block.pinned !== null}
+  class:compressed={block.compressionLevel !== "original"}
   class:current-search-match={isCurrentMatch}
   style:--role-color={displayColor}
   data-block-id={block.id}
@@ -225,6 +226,9 @@
       <span class="lang-badge">{detectedLang}</span>
     {/if}
     <span class="token-count">{formatTokens(block.tokens)}</span>
+    {#if block.compressionLevel !== "original"}
+      <span class="compression-inline-badge">{block.compressionLevel}</span>
+    {/if}
     <span class="staleness-badge" title={`Staleness score ${stalenessScore.toFixed(1)}`}>
       S:{stalenessScore.toFixed(1)}
     </span>
@@ -319,6 +323,11 @@
   .block.dragging {
     opacity: 0.4;
     box-shadow: none;
+  }
+
+  .block.compressed {
+    opacity: 0.85;
+    border-style: dashed;
   }
 
   .block.pinned::after {
@@ -482,6 +491,19 @@
 
   .block:hover .block-content.has-overflow::after {
     background: linear-gradient(transparent, var(--bg-hover));
+  }
+
+  .compression-inline-badge {
+    font-family: var(--font-mono);
+    font-size: 8px;
+    font-weight: 600;
+    text-transform: uppercase;
+    color: var(--semantic-warning);
+    letter-spacing: 0.3px;
+    background: color-mix(in srgb, var(--semantic-warning) 15%, transparent);
+    padding: 1px 4px;
+    border-radius: 2px;
+    border: 1px dashed color-mix(in srgb, var(--semantic-warning) 30%, transparent);
   }
 
   .compression-badge {

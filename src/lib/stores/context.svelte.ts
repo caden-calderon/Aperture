@@ -6,7 +6,15 @@
  * Persists blocks and snapshots to localStorage
  */
 
-import type { Block, Zone, TokenBudget, Snapshot, SnapshotZoneState, Role } from "../types";
+import type {
+  Block,
+  Zone,
+  TokenBudget,
+  Snapshot,
+  SnapshotZoneState,
+  Role,
+  CompressionSettings,
+} from "../types";
 import { isRole } from "../types";
 import {
   generateDemoBlocks,
@@ -15,6 +23,7 @@ import {
 } from "../mock-data";
 import { editHistoryStore } from "./editHistory.svelte";
 import { zonesStore } from "./zones.svelte";
+import { uiStore } from "./ui.svelte";
 import { invoke } from "@tauri-apps/api/core";
 import {
   type ContextMutationMode,
@@ -30,6 +39,8 @@ let engineBudgetLimit = $state<number | null>(null);
 let activeEngineSessionId = $state<string | null>(null);
 let _activeEngineThreadIdentity = $state<string | null>(null);
 let contextMutationMode = $state<ContextMutationMode>("proxy_mutable");
+let budgetCeiling = $state<number>(loadBudgetCeiling());
+let compressionSettings = $state<CompressionSettings>(defaultCompressionSettings());
 let localHotPatchesBySession = $state<
   Record<string, Array<{ role: Role; originalContent: string; newContent: string }>>
 >({});
@@ -44,6 +55,63 @@ let workingStateCache = $state<{ blocks: Block[]; zoneState: SnapshotZoneState }
 
 const STORAGE_KEY = "aperture-context";
 const DEFAULT_PATCH_SESSION_KEY = "__default__";
+const BUDGET_CEILING_KEY = "aperture:budget-ceiling";
+
+function loadBudgetCeiling(): number {
+  try {
+    const stored = localStorage.getItem(BUDGET_CEILING_KEY);
+    if (stored) {
+      const val = parseFloat(stored);
+      if (!isNaN(val) && val >= 0.4 && val <= 1.0) return val;
+    }
+  } catch { /* ignore */ }
+  return 0.80;
+}
+
+function defaultCompressionSettings(): CompressionSettings {
+  return {
+    backend: "auto",
+    model: null,
+    timeoutMs: 12_000,
+    maxTokens: 512,
+    openrouterBaseUrl: null,
+    openrouterApiKeyEnv: "OPENROUTER_API_KEY",
+  };
+}
+
+function normalizeCompressionSettings(
+  value: Partial<CompressionSettings> | null | undefined
+): CompressionSettings {
+  const fallback = defaultCompressionSettings();
+  const backend = value?.backend;
+  const validBackend =
+    backend === "auto" ||
+    backend === "disabled" ||
+    backend === "anthropic" ||
+    backend === "open_ai" ||
+    backend === "open_router";
+
+  return {
+    backend: validBackend ? backend : fallback.backend,
+    model: typeof value?.model === "string" ? value.model.trim() || null : fallback.model,
+    timeoutMs:
+      typeof value?.timeoutMs === "number" && Number.isFinite(value.timeoutMs)
+        ? Math.max(500, Math.min(120000, Math.round(value.timeoutMs)))
+        : fallback.timeoutMs,
+    maxTokens:
+      typeof value?.maxTokens === "number" && Number.isFinite(value.maxTokens)
+        ? Math.max(64, Math.min(8192, Math.round(value.maxTokens)))
+        : fallback.maxTokens,
+    openrouterBaseUrl:
+      typeof value?.openrouterBaseUrl === "string"
+        ? value.openrouterBaseUrl.trim() || null
+        : fallback.openrouterBaseUrl,
+    openrouterApiKeyEnv:
+      typeof value?.openrouterApiKeyEnv === "string"
+        ? value.openrouterApiKeyEnv.trim() || null
+        : fallback.openrouterApiKeyEnv,
+  };
+}
 
 function patchSessionKey(sessionId: string | null): string {
   return sessionId ?? DEFAULT_PATCH_SESSION_KEY;
@@ -358,7 +426,9 @@ function init(): void {
   activeEngineSessionId = null;
   _activeEngineThreadIdentity = null;
   localHotPatchesBySession = {};
+  compressionSettings = defaultCompressionSettings();
   saveToLocalStorage();
+  void refreshCompressionSettings();
   // No demo data auto-load — start empty, blocks arrive via proxy capture.
   // Call loadDemoData() explicitly from the empty state UI if needed.
 }
@@ -764,8 +834,46 @@ function clearBlocks(): void {
 /** Replace blocks with engine-processed data (enriched with zones, tokens, heat). */
 function setEngineBlocks(newBlocks: Block[]): void {
   if (activeSnapshotId !== null) return; // Don't overwrite snapshot view
+
+  // Detect mutations (archival/compression) between old and new blocks
+  notifyBlockMutations(blocks, newBlocks);
+
   blocks = applyLocalHotPatches(newBlocks);
   markDirty();
+}
+
+/** Compare old and new block sets, surface context mutations as toasts. */
+function notifyBlockMutations(oldBlocks: Block[], newBlocks: Block[]): void {
+  if (oldBlocks.length === 0) return; // Initial load, no notifications
+
+  const oldIds = new Set(oldBlocks.map(b => b.id));
+  const newIds = new Set(newBlocks.map(b => b.id));
+  const newById = new Map(newBlocks.map(b => [b.id, b]));
+
+  const mutations: string[] = [];
+
+  // Detect archived blocks (present in old, absent in new)
+  for (const id of oldIds) {
+    if (!newIds.has(id)) {
+      mutations.push(`archived #${id.slice(0, 6)}`);
+    }
+  }
+
+  // Detect compressed blocks (compression level changed)
+  for (const oldBlock of oldBlocks) {
+    const newBlock = newById.get(oldBlock.id);
+    if (newBlock && newBlock.compressionLevel !== oldBlock.compressionLevel
+        && newBlock.compressionLevel !== "original") {
+      mutations.push(`${newBlock.compressionLevel} #${oldBlock.id.slice(0, 6)}`);
+    }
+  }
+
+  if (mutations.length === 0) return;
+
+  const summary = mutations.length <= 3
+    ? mutations.join(", ")
+    : `${mutations.length} context updates applied`;
+  uiStore.showToast(summary, "info");
 }
 
 /** Set the active engine session used for session-scoped local hot patch overlays. */
@@ -781,6 +889,47 @@ function setContextMutationMode(mode: ContextMutationMode): void {
 /** Set the engine-reported budget limit (overrides default 200k). */
 function setEngineBudget(limit: number): void {
   engineBudgetLimit = limit;
+}
+
+/** Set the planner budget ceiling (0.40–1.0) and persist to localStorage. */
+async function setBudgetCeiling(ceiling: number): Promise<void> {
+  const clamped = Math.max(0.4, Math.min(1.0, ceiling));
+  budgetCeiling = clamped;
+  try {
+    localStorage.setItem(BUDGET_CEILING_KEY, clamped.toString());
+  } catch { /* ignore */ }
+  try {
+    await invoke("engine_set_budget_ceiling", { ceiling: clamped });
+  } catch { /* engine may not be available */ }
+}
+
+/** Refresh compression settings from engine state (best-effort outside Tauri). */
+async function refreshCompressionSettings(): Promise<void> {
+  try {
+    const settings = await invoke<Partial<CompressionSettings>>("engine_get_compression_settings");
+    compressionSettings = normalizeCompressionSettings(settings);
+  } catch {
+    // Ignore when engine is unavailable (web tests/dev).
+  }
+}
+
+/** Replace compression settings and sync to engine (fail-open on IPC errors). */
+async function setCompressionSettings(settings: CompressionSettings): Promise<void> {
+  const normalized = normalizeCompressionSettings(settings);
+  compressionSettings = normalized;
+  try {
+    await invoke("engine_update_compression_settings", { settings: normalized });
+  } catch {
+    // Keep local state even if backend is unavailable.
+  }
+}
+
+/** Patch compression settings and sync merged result. */
+async function updateCompressionSettings(patch: Partial<CompressionSettings>): Promise<void> {
+  await setCompressionSettings({
+    ...compressionSettings,
+    ...patch,
+  });
 }
 
 /** Append new response blocks to existing context (incremental). */
@@ -933,6 +1082,12 @@ export const contextStore = {
   get contextMutationMode() {
     return contextMutationMode;
   },
+  get budgetCeiling() {
+    return budgetCeiling;
+  },
+  get compressionSettings() {
+    return compressionSettings;
+  },
 
   // Actions
   init,
@@ -969,4 +1124,8 @@ export const contextStore = {
   switchToSnapshot,
   switchToWorkingState,
   renameSnapshot,
+  setBudgetCeiling,
+  refreshCompressionSettings,
+  setCompressionSettings,
+  updateCompressionSettings,
 };

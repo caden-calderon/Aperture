@@ -69,7 +69,9 @@ dependencies = [
  "dashmap",
  "dotenvy",
  "futures-util",
+ "lazy_static",
  "portable-pty",
+ "regex",
  "reqwest 0.12.28",
  "rusqlite",
  "serde",
@@ -1189,6 +1191,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2dff15bf788c671c1934e366d07e30c1814a8ef514e1af724a602e8a2fbe1b10"
 dependencies = [
  "futures-core",
+ "futures-sink",
 ]
 
 [[package]]
@@ -3295,6 +3298,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "encoding_rs",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "h2",

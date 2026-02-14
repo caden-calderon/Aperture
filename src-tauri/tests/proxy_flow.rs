@@ -5,14 +5,18 @@
 //!
 //! Uses a mock upstream server (another axum instance) to avoid real API calls.
 
+use aperture_lib::engine::planner::types::{ContextMutation, PendingPlan};
 use aperture_lib::engine::types::Role;
+use aperture_lib::engine::ContextEngine;
 use aperture_lib::proxy::handler::proxy_handler;
 use aperture_lib::proxy::hot_patch::{HotPatch, HotPatchQueue, PatchSource};
+use aperture_lib::proxy::parser::{parse_request, parse_response};
 use aperture_lib::proxy::{ProxyState, UpstreamConfig};
 use axum::{
     body::Bytes, extract::OriginalUri, http::StatusCode, response::IntoResponse, routing::post,
     Json, Router,
 };
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::net::TcpListener;
@@ -129,6 +133,36 @@ async fn start_test_proxy(
     if let Some(hp) = hot_patches {
         state.hot_patches = hp;
     }
+    let state = Arc::new(state);
+
+    let app = Router::new()
+        .route("/{*path}", axum::routing::any(proxy_handler))
+        .with_state(state.clone());
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    (port, state)
+}
+
+/// Start the Aperture proxy pointed at a mock upstream with an attached engine.
+async fn start_test_proxy_with_engine(
+    upstream_url: &str,
+    engine: Arc<ContextEngine>,
+) -> (u16, Arc<ProxyState>) {
+    let config = UpstreamConfig {
+        anthropic_url: upstream_url.to_string(),
+        openai_url: upstream_url.to_string(),
+        chatgpt_codex_url: upstream_url.to_string(),
+    };
+
+    let mut state = ProxyState::with_config(config).unwrap();
+    state.engine = Some(engine);
     let state = Arc::new(state);
 
     let app = Router::new()
@@ -390,6 +424,370 @@ async fn test_openai_bare_responses_path_forwards_and_captures() {
             .iter()
             .any(|b| b.content.contains("Hello from codex")),
         "Expected user content captured from /responses request"
+    );
+}
+
+#[tokio::test]
+async fn test_capture_uses_rewritten_request_semantics() {
+    let (upstream_url, _) = start_mock_upstream().await;
+    let engine = Arc::new(ContextEngine::new_in_memory(None));
+
+    // Seed engine state so planner mutations can target real block IDs.
+    let path = "/v1/chat/completions";
+    let seed_request = serde_json::json!({
+        "model": "gpt-4.1",
+        "messages": [
+            { "role": "system", "content": "You are helpful." },
+            { "role": "user", "content": "Needs compression." },
+            { "role": "assistant", "content": "Middle info." },
+            { "role": "user", "content": "Archive me." }
+        ]
+    });
+    let seed_bytes = serde_json::to_vec(&seed_request).expect("serialize seed request");
+    let parsed_seed = parse_request(path, &seed_bytes).expect("parse seed request");
+    let seed_response = serde_json::to_vec(&serde_json::json!({
+        "model": "gpt-4.1",
+        "choices": [{
+            "message": { "role": "assistant", "content": "seed response" }
+        }],
+        "usage": { "prompt_tokens": 10, "completion_tokens": 3 }
+    }))
+    .expect("serialize seed response");
+    let parsed_seed_response =
+        parse_response(parsed_seed.provider, path, &seed_response).expect("parse seed response");
+    engine.ingest(
+        &parsed_seed.provider.to_string(),
+        &parsed_seed.model,
+        "proxy",
+        None,
+        parsed_seed.blocks,
+        parsed_seed_response.blocks,
+    );
+
+    let blocks = engine.active_session_blocks();
+    let compress_id = blocks
+        .iter()
+        .find(|b| b.content.contains("Needs compression."))
+        .map(|b| b.id.clone())
+        .expect("compress target");
+    let archive_id = blocks
+        .iter()
+        .find(|b| b.content.contains("Archive me."))
+        .map(|b| b.id.clone())
+        .expect("archive target");
+
+    engine.planner.set_pending_plan(PendingPlan {
+        mutations: vec![
+            ContextMutation::Compress {
+                block_id: compress_id,
+                summary: "compressed request content".to_string(),
+            },
+            ContextMutation::Archive {
+                block_id: archive_id,
+            },
+        ],
+        token_delta: -50,
+        projected_block_count: blocks.len().saturating_sub(1),
+        projected_utilization: 0.2,
+    });
+
+    let (proxy_port, state) = start_test_proxy_with_engine(&upstream_url, engine).await;
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("http://127.0.0.1:{proxy_port}{path}"))
+        .header("authorization", "Bearer sk-test-capture-order")
+        .header("content-type", "application/json")
+        .json(&seed_request)
+        .send()
+        .await
+        .expect("proxy request");
+
+    assert!(response.status().is_success());
+    let json: serde_json::Value = response.json().await.expect("response json");
+    let echoed = json["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        echoed.contains("compressed request content"),
+        "Upstream should receive rewritten compressed content"
+    );
+    assert!(
+        !echoed.contains("Archive me."),
+        "Upstream should not receive archived turn content"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let captured = state.capture.all_blocks();
+    assert!(
+        captured
+            .iter()
+            .any(|b| b.content.contains("compressed request content")),
+        "Capture should record rewritten request semantics"
+    );
+    assert!(
+        !captured.iter().any(|b| b.content.contains("Archive me.")),
+        "Capture should not keep pre-rewrite archived content"
+    );
+}
+
+#[tokio::test]
+async fn test_context_only_interception_reinvoke_returns_final_response_and_captures_it() {
+    let call_count = Arc::new(AtomicUsize::new(0));
+    let call_count_for_route = call_count.clone();
+
+    let app = Router::new().route(
+        "/v1/responses",
+        post(move |Json(body): Json<serde_json::Value>| {
+            let call_count = call_count_for_route.clone();
+            async move {
+                call_count.fetch_add(1, Ordering::SeqCst);
+
+                let has_context_result = body
+                    .get("input")
+                    .and_then(|v| v.as_array())
+                    .map(|items| {
+                        items.iter().any(|item| {
+                            item.get("type").and_then(|v| v.as_str())
+                                == Some("function_call_output")
+                                && item.get("call_id").and_then(|v| v.as_str()) == Some("ctx_1")
+                        })
+                    })
+                    .unwrap_or(false);
+
+                if has_context_result {
+                    Json(serde_json::json!({
+                        "id": "resp_final",
+                        "model": "gpt-4.1",
+                        "output": [{
+                            "type": "message",
+                            "content": [{ "type": "output_text", "text": "final answer after context tool" }]
+                        }],
+                        "usage": { "input_tokens": 14, "output_tokens": 6 }
+                    }))
+                    .into_response()
+                } else {
+                    Json(serde_json::json!({
+                        "id": "resp_context_only",
+                        "model": "gpt-4.1",
+                        "output": [{
+                            "type": "function_call",
+                            "name": "aperture_context_preview",
+                            "call_id": "ctx_1",
+                            "arguments": "{}"
+                        }],
+                        "usage": { "input_tokens": 10, "output_tokens": 2 }
+                    }))
+                    .into_response()
+                }
+            }
+        }),
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let upstream_url = format!("http://127.0.0.1:{port}");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let engine = Arc::new(ContextEngine::new_in_memory(None));
+    let (proxy_port, state) = start_test_proxy_with_engine(&upstream_url, engine).await;
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("http://127.0.0.1:{proxy_port}/v1/responses"))
+        .header("authorization", "Bearer sk-test-context")
+        .header("content-type", "application/json")
+        .json(&serde_json::json!({
+            "model": "gpt-4.1",
+            "input": [{ "type": "message", "role": "user", "content": "run context tool" }]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert!(response.status().is_success());
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["output"][0]["type"], "message");
+    assert_eq!(
+        body["output"][0]["content"][0]["text"],
+        "final answer after context tool"
+    );
+    assert_eq!(
+        call_count.load(Ordering::SeqCst),
+        2,
+        "Context-only interception should re-invoke exactly once"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let blocks = state.capture.all_blocks();
+    assert!(
+        blocks
+            .iter()
+            .any(|b| b.role == Role::Assistant
+                && b.content.contains("final answer after context tool")),
+        "Capture should record the modified re-invoked response body"
+    );
+    assert!(
+        !blocks
+            .iter()
+            .any(|b| { b.role == Role::ToolUse && b.content.contains("aperture_context_preview") }),
+        "Capture should not retain the stripped context-only upstream response"
+    );
+}
+
+#[tokio::test]
+async fn test_mixed_interception_strips_context_calls_without_reinvoke() {
+    let call_count = Arc::new(AtomicUsize::new(0));
+    let call_count_for_route = call_count.clone();
+
+    let app = Router::new().route(
+        "/v1/responses",
+        post(move |_body: Bytes| {
+            let call_count = call_count_for_route.clone();
+            async move {
+                call_count.fetch_add(1, Ordering::SeqCst);
+                Json(serde_json::json!({
+                    "id": "resp_mixed",
+                    "model": "gpt-4.1",
+                    "output": [
+                        {
+                            "type": "function_call",
+                            "name": "aperture_context_preview",
+                            "call_id": "ctx_1",
+                            "arguments": "{}"
+                        },
+                        {
+                            "type": "function_call",
+                            "name": "read_file",
+                            "call_id": "real_1",
+                            "arguments": "{\"path\":\"src/main.rs\"}"
+                        }
+                    ],
+                    "usage": { "input_tokens": 10, "output_tokens": 2 }
+                }))
+            }
+        }),
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let upstream_url = format!("http://127.0.0.1:{port}");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let engine = Arc::new(ContextEngine::new_in_memory(None));
+    let (proxy_port, state) = start_test_proxy_with_engine(&upstream_url, engine).await;
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("http://127.0.0.1:{proxy_port}/v1/responses"))
+        .header("authorization", "Bearer sk-test-context")
+        .header("content-type", "application/json")
+        .json(&serde_json::json!({
+            "model": "gpt-4.1",
+            "input": [{ "type": "message", "role": "user", "content": "mixed tool output" }]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert!(response.status().is_success());
+    let body: serde_json::Value = response.json().await.unwrap();
+    let output = body["output"].as_array().expect("output array");
+    assert_eq!(output.len(), 1, "Context tool call should be stripped");
+    assert_eq!(output[0]["name"], "read_file");
+    assert_eq!(
+        call_count.load(Ordering::SeqCst),
+        1,
+        "Mixed responses should not trigger re-invoke"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let blocks = state.capture.all_blocks();
+    assert!(
+        blocks
+            .iter()
+            .any(|b| b.role == Role::ToolUse && b.content.contains("Tool: read_file")),
+        "Capture should include only the effective non-context tool call"
+    );
+    assert!(
+        !blocks
+            .iter()
+            .any(|b| { b.role == Role::ToolUse && b.content.contains("aperture_context_preview") }),
+        "Capture should not include stripped context tool calls"
+    );
+}
+
+#[tokio::test]
+async fn test_context_only_reinvoke_depth_limit_fail_open() {
+    let call_count = Arc::new(AtomicUsize::new(0));
+    let call_count_for_route = call_count.clone();
+
+    let app = Router::new().route(
+        "/v1/responses",
+        post(move |_body: Bytes| {
+            let call_count = call_count_for_route.clone();
+            async move {
+                call_count.fetch_add(1, Ordering::SeqCst);
+                Json(serde_json::json!({
+                    "id": "resp_loop",
+                    "model": "gpt-4.1",
+                    "output": [{
+                        "type": "function_call",
+                        "name": "aperture_context_preview",
+                        "call_id": "ctx_loop",
+                        "arguments": "{}"
+                    }],
+                    "usage": { "input_tokens": 9, "output_tokens": 2 }
+                }))
+            }
+        }),
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let upstream_url = format!("http://127.0.0.1:{port}");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let engine = Arc::new(ContextEngine::new_in_memory(None));
+    let (proxy_port, _state) = start_test_proxy_with_engine(&upstream_url, engine).await;
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("http://127.0.0.1:{proxy_port}/v1/responses"))
+        .header("authorization", "Bearer sk-test-context")
+        .header("content-type", "application/json")
+        .json(&serde_json::json!({
+            "model": "gpt-4.1",
+            "input": [{ "type": "message", "role": "user", "content": "loop context call" }]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert!(
+        response.status().is_success(),
+        "Depth-limit exhaustion should fail-open with a successful proxy response"
+    );
+    let body: serde_json::Value = response.json().await.unwrap();
+    let output = body["output"].as_array().expect("output array");
+    assert!(
+        output.is_empty(),
+        "Fallback stripped response should remove context-only tool calls"
+    );
+    assert_eq!(
+        call_count.load(Ordering::SeqCst),
+        4,
+        "Expected 1 initial call + 3 re-invokes before depth fail-open"
     );
 }
 
