@@ -1,10 +1,16 @@
-# Phase 4 Compression Readiness Context (2026-02-13)
+# Phase 4 Compression Readiness Context (2026-02-14)
 
 ## Current State
 - Phase 3 metacognition/dynamic shifting is complete through Wave 3 remediation.
 - Phase 4 has started with **Checkpoint A foundations implemented**.
+- Manual validation pass is now running with Phase 3 smoke tests first, then Phase 4 progression.
 - Proxy fail-open behavior is preserved; no request/response critical-path blocking was introduced.
 - Existing planner/archive semantics remain unchanged in this checkpoint.
+
+## Active Validation Note
+- MCP/tool smoke testing surfaced a conversation-shape failure before Aperture tools could be fully exercised:
+  - `invalid_request_error` with orphan `tool_result` / missing prior `tool_use`.
+- This is currently treated as a Phase 3 verification blocker to clear before continuing deeper Phase 4 behavior testing.
 
 ## What Checkpoint A Added
 - New `engine::compression` module with:

@@ -10,10 +10,10 @@
 | Field | Value |
 |-------|-------|
 | **Phase** | 4 — Compression Readiness (Checkpoint A complete) |
-| **Status** | Phase 3 complete/remediated; Phase 4 Checkpoint A foundations implemented and validated |
-| **Last Updated** | 2026-02-13 |
-| **Blocking Issues** | No Checkpoint A blockers; provider execution path not implemented yet |
-| **Next Step** | Begin Phase 4 Checkpoint B (real provider adapters + queue worker integration). |
+| **Status** | Phase 3 complete/remediated; Phase 4 Checkpoint A complete; manual verification in progress |
+| **Last Updated** | 2026-02-14 |
+| **Blocking Issues** | MCP smoke test currently hitting Anthropic orphan `tool_result` validation error |
+| **Next Step** | Triage/fix Phase 3 tool lifecycle validation issue, then continue Phase 4 Checkpoint B. |
 
 ---
 
@@ -47,6 +47,11 @@
 
 **Next checkpoint:**
 - Implement real provider adapters + queue worker execution (Checkpoint B), then integrate autonomous sidekick compression path.
+
+**Current verification issue (2026-02-14):**
+- MCP smoke test failed with Anthropic validation error:
+  - `unexpected tool_use_id found in tool_result blocks ... must have a corresponding tool_use block in the previous message`
+- Treat as Phase 3 lifecycle triage before deeper Phase 4 testing.
 
 ### Phase 3 Staff Review + Remediation Plan (NEW)
 

@@ -1,4 +1,4 @@
-# Phase 3 Remediation Context (2026-02-13)
+# Phase 3 Remediation Context (2026-02-14)
 
 ## Current State
 - Checkpoints A-G are implemented.
@@ -45,7 +45,11 @@ Phase 3’s value proposition is continuous, reliable context optimization. If m
 
 ## Remaining Blockers
 - No Wave 3 blockers remain.
-- Phase 4 work has not started (intentionally out of scope for this remediation wave).
+- Manual Phase 3 smoke-testing is in progress while Phase 4 starts.
+- New observed issue during MCP/tool smoke test:
+  - Anthropic validation error: orphan `tool_result` (`unexpected tool_use_id ... must have a corresponding tool_use block in the previous message`).
+  - Impact: MCP discovery/session can fail before Aperture context tools are exercised.
+  - Status: needs focused repro + fix validation in proxy cleanup/rewrite path.
 
 ## Source Artifacts
 - Staff review: `dev/active/metacog-dynamic-shifting/staff-review-2026-02-13.md`

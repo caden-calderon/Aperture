@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "aperture": {
+      "command": "./src-tauri/target/debug/aperture-mcp",
+      "env": {
+        "APERTURE_PORT": "5400"
+      }
+    }
+  }
+}
