@@ -46,10 +46,51 @@ Phase 3’s value proposition is continuous, reliable context optimization. If m
 ## Remaining Blockers
 - No Wave 3 blockers remain.
 - Manual Phase 3 smoke-testing is in progress while Phase 4 starts.
-- New observed issue during MCP/tool smoke test:
-  - Anthropic validation error: orphan `tool_result` (`unexpected tool_use_id ... must have a corresponding tool_use block in the previous message`).
-  - Impact: MCP discovery/session can fail before Aperture context tools are exercised.
-  - Status: needs focused repro + fix validation in proxy cleanup/rewrite path.
+- MCP smoke-test issue (Anthropic orphan `tool_result`) is now mitigated in code:
+  - Autonomous heuristics no longer archive `tool_use` / `tool_result` blocks.
+  - Rewriter now sanitizes orphan Anthropic `tool_result` blocks before forwarding.
+  - Parser now generates deterministic block IDs (instead of random UUIDs) so IDs remain stable across identical parses and turn-appends.
+  - `aperture_context_plan` now supports staged strategic flow (`stage/append/preview/commit/discard`) with heuristic suppression while staged.
+  - Added operator recovery control (`engine_clear_context` + Settings “Clear Archive + Sessions”) to quickly reset corrupted test state between runs.
+- Status: pending manual confirmation in live Claude session.
+- New critical blocker discovered during live validation:
+  - severe token/cost incident with high request fan-out and extreme cache token churn in Claude sessions.
+  - this is currently the top-priority diagnostic item before continued Phase 4 expansion.
+
+## Incident Addendum (2026-02-14)
+- Aggregate evidence from recent local Claude session logs (deduped request IDs):
+  - `requests=375`
+  - `cache_creation_input_tokens=822,460`
+  - `cache_read_input_tokens=46,096,657`
+  - `total_including_cache=46,919,745`
+- Focused validation session (`401b10df...`) showed:
+  - `46` unique requests in ~10 minutes
+  - `5,339,090` cache creation tokens
+  - `0` cache read tokens
+  - per-request cache creation growth into 100k+ range.
+- Interpretation:
+  - Major burn appears driven by model/tool request fan-out and large cached prompt prefix behavior.
+  - not primarily explained by Aperture archive persistence.
+- Scope note:
+  - Largest burn sessions inspected had no `aperture_context_*` calls, indicating broader runtime/tool orchestration overhead outside direct Aperture context-tool usage.
+
+## Incident Remediation Addendum (2026-02-14, P0)
+- Exact trigger path identified in local logs:
+  - focused session `401b10df...`: `46` unique requests in ~10 minutes (`~4.57 req/min`), `45/46` with tool calls.
+  - heavy session `88e1b95d...`: `121` unique requests in ~14.6 minutes (`~8.30 req/min`), `121/121` with tool calls.
+  - queue/progress amplification in `d27ec2d0...`: `412` queue-operation lines with only `3` unique payloads; large repeated task notifications.
+- Aperture-side mitigations implemented:
+  - low-overhead context tool argument validation (`read/search/plan`) before dispatch.
+  - output-size controls/truncation for context tool responses (`preview/read/search/status`) with compact mode under burst conditions.
+  - proxy runaway-guard detector for sustained request bursts (warning-only, fail-open preserved) plus compact fallback for high-cost context-tool calls during hard bursts.
+- Architecture boundary clarified:
+  - Claude/provider request fan-out behavior and queue notification duplication remain external.
+  - Aperture now limits additional local prompt bloat and surfaces operator-visible warnings during runaway patterns.
+
+## Project Direction Update (2026-02-15)
+- Phase 4 execution is now gated by token-economics parity.
+- Expansion work (new providers/queueed autonomous compression) is paused until Aperture is measured at or below baseline Claude Code token usage on benchmark tasks.
+- Next-phase architecture emphasis is delta-based context transport plus session-level ROI control, not additional guardrail layering alone.
 
 ## Source Artifacts
 - Staff review: `dev/active/metacog-dynamic-shifting/staff-review-2026-02-13.md`

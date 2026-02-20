@@ -14,6 +14,7 @@ pub mod interceptor;
 pub mod parser;
 pub mod provider_adapter;
 pub mod rewriter;
+pub mod runaway_guard;
 
 use axum::{routing::any, Router};
 use reqwest::Client;
@@ -25,6 +26,7 @@ use tracing::info;
 use self::capture::CaptureStore;
 use self::error::ProxyError;
 use self::hot_patch::HotPatchQueue;
+use self::runaway_guard::RunawayGuard;
 use crate::engine::ContextEngine;
 use crate::events::dispatcher::DynDispatcher;
 
@@ -71,6 +73,8 @@ pub struct ProxyState {
     /// Context engine for block processing, sessions, and persistence.
     /// `None` when running without the engine (e.g., basic tests).
     pub engine: Option<Arc<ContextEngine>>,
+    /// Runaway-request detector for advisory warnings and compact fallback mode.
+    pub runaway_guard: Arc<RunawayGuard>,
 }
 
 impl ProxyState {
@@ -109,6 +113,7 @@ impl ProxyState {
             dispatcher: None,
             hot_patches: Arc::new(HotPatchQueue::new()),
             engine: None,
+            runaway_guard: Arc::new(RunawayGuard::new()),
         })
     }
 

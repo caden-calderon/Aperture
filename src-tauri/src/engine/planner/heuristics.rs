@@ -5,8 +5,8 @@
 //! the planner pipeline — model intent takes priority.
 //!
 //! Three pressure levels derived from `PlannerConfig`:
-//! - **Soft** (default 40% utilization): Archive stalest blocks
-//! - **Medium** (default 64% utilization): Archive middle-zone stale blocks
+//! - **Soft** (default 40% utilization): Archive stalest blocks (free ~5% of budget)
+//! - **Medium** (default 64% utilization): Archive middle-zone stale blocks (free ~15%)
 //! - **Hard** (default 80% utilization): Emergency — protect only primacy + recency
 
 use std::collections::HashSet;
@@ -14,11 +14,97 @@ use std::collections::HashSet;
 use tracing::debug;
 
 use super::relevance;
-use super::types::{ContextMutation, HeuristicSignals, PlannerConfig};
+use super::types::{
+    ArchivalSuggestion, ArchivalSuggestionTier, ContextMutation, HeuristicSignals, PlannerConfig,
+};
 use crate::engine::block::Block;
-use crate::engine::budget::BudgetStatus;
+use crate::engine::budget::{AlertLevel, BudgetStatus};
 use crate::engine::staleness::{rank_by_staleness, StalenessConfig};
-use crate::engine::types::{BuiltInZone, Zone};
+use crate::engine::types::{BuiltInZone, Role, Zone};
+
+/// Collect archival candidates WITHOUT applying mutations.
+/// Returns list of candidates with metadata for LLM review.
+///
+/// This is the suggestion-only version of archival heuristics. Used by the
+/// planner to generate `ArchivalSuggestion`s that are surfaced to the LLM
+/// via `aperture_context_preview` tool. The LLM decides whether to accept,
+/// reject, or refine these suggestions via staged planning.
+pub fn collect_archival_candidates(
+    blocks: &[Block],
+    budget: &BudgetStatus,
+    signals: &HeuristicSignals,
+    config: &PlannerConfig,
+) -> Vec<ArchivalSuggestion> {
+    let mut tier_a = Vec::new();
+    let mut tier_b = Vec::new();
+
+    // Compute relevance boosts from current-turn file references
+    let relevance_boosts = relevance::compute_relevance_boosts(blocks, &signals.current_turn_files);
+
+    let staleness_config = StalenessConfig::default();
+    let current_turn = signals.current_turn;
+
+    // Determine pressure level
+    let pressure_level = if budget.utilization >= config.hard_utilization() {
+        AlertLevel::Emergency
+    } else if budget.utilization >= config.medium_utilization() {
+        AlertLevel::Critical
+    } else if budget.utilization >= config.soft_utilization() {
+        AlertLevel::Warning
+    } else {
+        AlertLevel::Normal
+    };
+
+    // Get candidates: unpinned, not boosted by relevance
+    let ranked = rank_by_staleness(blocks, current_turn + 1, &staleness_config);
+
+    let allow_tier_b = signals.task_boundary_detected && pressure_level >= AlertLevel::Critical;
+
+    for (block_id, _score) in ranked {
+        let Some(block) = blocks.iter().find(|b| b.id == block_id) else {
+            continue;
+        };
+
+        // Skip if not archival candidate
+        if !is_archival_candidate(blocks, &block_id, &relevance_boosts, pressure_level) {
+            continue;
+        }
+
+        let turns_since =
+            current_turn.saturating_sub(block.last_referenced_turn.max(block.metadata.turn_index));
+        let is_stale = turns_since >= config.staleness_turn_threshold;
+
+        // Tier A (default): stale + middle-zone only.
+        if block.zone == Zone::BuiltIn(BuiltInZone::Middle) && is_stale {
+            tier_a.push(ArchivalSuggestion {
+                block_id: block.id.clone(),
+                tier: ArchivalSuggestionTier::TierA,
+                reason: format!("stale ({} turns)", turns_since),
+                staleness_turns: turns_since,
+                zone: block.zone.clone(),
+                file_refs: block.metadata.file_paths.clone(),
+                tokens: block.tokens,
+            });
+            continue;
+        }
+
+        // Tier B (opportunistic): recency candidates only when all gates pass.
+        if allow_tier_b && block.zone == Zone::BuiltIn(BuiltInZone::Recency) {
+            tier_b.push(ArchivalSuggestion {
+                block_id: block.id.clone(),
+                tier: ArchivalSuggestionTier::TierB,
+                reason: "task-boundary pressure: low-relevance recency".to_string(),
+                staleness_turns: turns_since,
+                zone: block.zone.clone(),
+                file_refs: block.metadata.file_paths.clone(),
+                tokens: block.tokens,
+            });
+        }
+    }
+
+    tier_a.extend(tier_b);
+    tier_a
+}
 
 /// Apply autonomous heuristics to generate additional mutations.
 ///
@@ -74,8 +160,8 @@ pub fn apply_heuristics(
 ///
 /// Progressive archival depending on how close we are to the budget ceiling:
 /// - Below soft: no action
-/// - Soft → medium: archive stalest unpinned blocks (up to 3)
-/// - Medium → hard: archive all stale middle-zone blocks
+/// - Soft → medium: archive stalest blocks to free ~5% of budget limit
+/// - Medium → hard: archive stale middle-zone blocks to free ~15% of budget limit
 /// - Above hard: emergency archival — archive everything except primacy + recency
 fn apply_budget_pressure(
     blocks: &[Block],
@@ -97,13 +183,23 @@ fn apply_budget_pressure(
         .max()
         .unwrap_or(0);
 
+    // Determine pressure level for tool-block archival decisions
+    let pressure_level = if utilization >= config.hard_utilization() {
+        AlertLevel::Emergency
+    } else if utilization >= config.medium_utilization() {
+        AlertLevel::Critical
+    } else {
+        AlertLevel::Warning
+    };
+
     // Get candidates: unpinned, not protected by model, not boosted by relevance
     let ranked = rank_by_staleness(blocks, current_turn + 1, &staleness_config);
 
     let candidates: Vec<&str> = ranked
         .iter()
         .filter(|(id, _score)| {
-            !protected_ids.contains(id) && is_archival_candidate(blocks, id, relevance_boosts)
+            !protected_ids.contains(id)
+                && is_archival_candidate(blocks, id, relevance_boosts, pressure_level)
         })
         .map(|(id, _)| id.as_str())
         .collect();
@@ -126,37 +222,51 @@ fn apply_budget_pressure(
             })
             .collect()
     } else if utilization >= config.medium_utilization() {
-        // Medium pressure: archive stale middle-zone blocks
+        // Medium pressure: archive stale middle-zone blocks to free ~15% of budget
         debug!(
             "Medium budget pressure ({:.0}%) — archiving stale middle blocks",
             utilization * 100.0
         );
-        candidates
-            .into_iter()
-            .filter(|id| {
-                blocks
-                    .iter()
-                    .any(|b| b.id == *id && b.zone == Zone::BuiltIn(BuiltInZone::Middle))
-            })
-            .take(MAX_MEDIUM_ARCHIVAL)
-            .map(|id| ContextMutation::Archive {
-                block_id: id.to_string(),
-            })
-            .collect()
+        let target_tokens = (budget.limit_tokens as f64 * MEDIUM_TARGET_FRACTION) as u32;
+        accumulate_archival_candidates(blocks, candidates, target_tokens, true)
     } else {
-        // Soft pressure: archive stalest blocks (limited count)
+        // Soft pressure: archive stalest blocks to free ~5% of budget
         debug!(
             "Soft budget pressure ({:.0}%) — archiving stalest blocks",
             utilization * 100.0
         );
-        candidates
-            .into_iter()
-            .take(MAX_SOFT_ARCHIVAL)
-            .map(|id| ContextMutation::Archive {
-                block_id: id.to_string(),
-            })
-            .collect()
+        let target_tokens = (budget.limit_tokens as f64 * SOFT_TARGET_FRACTION) as u32;
+        accumulate_archival_candidates(blocks, candidates, target_tokens, false)
     }
+}
+
+/// Walk candidates in staleness order, accumulating token savings until target is met.
+fn accumulate_archival_candidates(
+    blocks: &[Block],
+    candidates: Vec<&str>,
+    target_tokens: u32,
+    middle_only: bool,
+) -> Vec<ContextMutation> {
+    let mut mutations = Vec::new();
+    let mut accumulated: u32 = 0;
+
+    for id in candidates {
+        if accumulated >= target_tokens {
+            break;
+        }
+        let Some(block) = blocks.iter().find(|b| b.id == id) else {
+            continue;
+        };
+        if middle_only && block.zone != Zone::BuiltIn(BuiltInZone::Middle) {
+            continue;
+        }
+        accumulated = accumulated.saturating_add(block.tokens);
+        mutations.push(ContextMutation::Archive {
+            block_id: id.to_string(),
+        });
+    }
+
+    mutations
 }
 
 /// Apply staleness-driven archival for blocks exceeding the turn threshold.
@@ -182,10 +292,13 @@ fn apply_staleness_archival(
     let mut mutations = Vec::new();
 
     for block in blocks {
-        // Skip protected, already archived, pinned, or primacy/recency blocks
+        // Skip protected, already archived, pinned, thinking, or primacy/recency blocks
         if protected_ids.contains(&block.id)
             || already_archived_ids.contains(block.id.as_str())
             || block.pinned.is_some()
+            || block.role == Role::Thinking
+            || block.role == Role::ToolUse
+            || block.role == Role::ToolResult
             || block.zone == Zone::BuiltIn(BuiltInZone::Primacy)
             || block.zone == Zone::BuiltIn(BuiltInZone::Recency)
         {
@@ -216,10 +329,14 @@ fn apply_staleness_archival(
 ///
 /// Excludes: pinned blocks, primacy/recency zone blocks, and blocks
 /// with high relevance boosts from current-turn file references.
+///
+/// Tool lifecycle blocks (ToolUse/ToolResult) are only archivable at
+/// Critical/Emergency pressure AND when in the Middle zone.
 fn is_archival_candidate(
     blocks: &[Block],
     block_id: &str,
     relevance_boosts: &std::collections::HashMap<String, f64>,
+    pressure_level: AlertLevel,
 ) -> bool {
     let Some(block) = blocks.iter().find(|b| b.id == block_id) else {
         return false;
@@ -230,9 +347,24 @@ fn is_archival_candidate(
         return false;
     }
 
+    // Thinking blocks are never candidates — Anthropic requires byte-identical preservation
+    if block.role == Role::Thinking {
+        return false;
+    }
+
     // Primacy zone blocks are protected (system prompts, etc.)
     if block.zone == Zone::BuiltIn(BuiltInZone::Primacy) {
         return false;
+    }
+
+    // Tool lifecycle blocks: only archivable at Critical+ pressure in Middle zone
+    if block.role == Role::ToolUse || block.role == Role::ToolResult {
+        if pressure_level < AlertLevel::Critical {
+            return false;
+        }
+        if block.zone != Zone::BuiltIn(BuiltInZone::Middle) {
+            return false;
+        }
     }
 
     // Blocks with strong relevance boosts resist archival
@@ -245,11 +377,11 @@ fn is_archival_candidate(
     true
 }
 
-/// Maximum blocks to archive at soft pressure.
-const MAX_SOFT_ARCHIVAL: usize = 3;
+/// Target fraction of budget limit to free at soft pressure (~5%).
+const SOFT_TARGET_FRACTION: f64 = 0.05;
 
-/// Maximum blocks to archive at medium pressure.
-const MAX_MEDIUM_ARCHIVAL: usize = 10;
+/// Target fraction of budget limit to free at medium pressure (~15%).
+const MEDIUM_TARGET_FRACTION: f64 = 0.15;
 
 /// Minimum relevance boost that prevents archival.
 const RELEVANCE_ARCHIVAL_THRESHOLD: f64 = 0.3;
@@ -307,6 +439,18 @@ mod tests {
         make_block_full(id, zone, tokens, turn, 0, vec![])
     }
 
+    fn make_block_with_role(
+        id: &str,
+        role: Role,
+        zone: BuiltInZone,
+        tokens: u32,
+        turn: u32,
+    ) -> Block {
+        let mut block = make_block(id, zone, tokens, turn);
+        block.role = role;
+        block
+    }
+
     fn mock_budget(used: u32, limit: u32) -> BudgetStatus {
         let utilization = if limit > 0 {
             used as f64 / limit as f64
@@ -335,6 +479,72 @@ mod tests {
             current_turn,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn test_collect_archival_candidates_tier_a_only_stale_middle() {
+        let blocks = vec![
+            make_block("middle_stale", BuiltInZone::Middle, 1200, 0),
+            make_block("middle_recent", BuiltInZone::Middle, 1200, 9),
+            make_block("recency", BuiltInZone::Recency, 1200, 9),
+        ];
+        let budget = mock_budget(20_000, 200_000); // below pressure thresholds
+        let config = PlannerConfig {
+            staleness_turn_threshold: 5,
+            ..PlannerConfig::default()
+        };
+        let signals = default_signals(10);
+
+        let suggestions = collect_archival_candidates(&blocks, &budget, &signals, &config);
+
+        assert_eq!(suggestions.len(), 1);
+        assert_eq!(suggestions[0].block_id, "middle_stale");
+        assert!(suggestions[0].tier.is_primary());
+    }
+
+    #[test]
+    fn test_collect_archival_candidates_tier_b_requires_boundary_and_critical_pressure() {
+        let blocks = vec![make_block(
+            "recency_old_task",
+            BuiltInZone::Recency,
+            1500,
+            1,
+        )];
+        let config = PlannerConfig {
+            staleness_turn_threshold: 100,
+            ..PlannerConfig::default()
+        };
+
+        let baseline_budget = mock_budget(100_000, 200_000); // 50% < critical (64%)
+        let baseline_signals = HeuristicSignals {
+            current_turn: 10,
+            task_boundary_detected: true,
+            ..Default::default()
+        };
+        let baseline =
+            collect_archival_candidates(&blocks, &baseline_budget, &baseline_signals, &config);
+        assert!(
+            baseline.is_empty(),
+            "Tier B disabled below critical pressure"
+        );
+
+        let critical_budget = mock_budget(150_000, 200_000); // 75% >= critical
+        let no_boundary_signals = HeuristicSignals {
+            current_turn: 10,
+            task_boundary_detected: false,
+            ..Default::default()
+        };
+        let no_boundary =
+            collect_archival_candidates(&blocks, &critical_budget, &no_boundary_signals, &config);
+        assert!(
+            no_boundary.is_empty(),
+            "Tier B disabled without task boundary"
+        );
+
+        let tier_b =
+            collect_archival_candidates(&blocks, &critical_budget, &baseline_signals, &config);
+        assert_eq!(tier_b.len(), 1);
+        assert!(!tier_b[0].tier.is_primary());
     }
 
     // ── Budget Pressure Tests ────────────────────────────────
@@ -381,7 +591,6 @@ mod tests {
 
         // Should archive some blocks but not all
         assert!(!mutations.is_empty());
-        assert!(mutations.len() <= MAX_SOFT_ARCHIVAL);
         // Should target stalest (oldest + largest) first
         let archived_ids: Vec<&str> = mutations
             .iter()
@@ -394,8 +603,8 @@ mod tests {
     }
 
     #[test]
-    fn test_soft_pressure_budget_archives_limited() {
-        // Use recent blocks that won't trigger staleness archival
+    fn test_soft_pressure_budget_limits_by_tokens() {
+        // Create blocks where token accumulation matters
         let blocks: Vec<Block> = (0..10)
             .map(|i| make_block(&format!("b{i}"), BuiltInZone::Middle, 500, i + 8))
             .collect();
@@ -413,13 +622,29 @@ mod tests {
             &HashSet::new(),
         );
 
+        // Soft target: 5% of 200k = 10k tokens. Each block is 500 tokens.
+        // Should archive up to 20 blocks to hit 10k, but we only have 10 candidates.
         let archive_count = mutations
             .iter()
             .filter(|m| matches!(m, ContextMutation::Archive { .. }))
             .count();
+        let archived_tokens: u32 = mutations
+            .iter()
+            .filter_map(|m| match m {
+                ContextMutation::Archive { block_id } => {
+                    blocks.iter().find(|b| b.id == *block_id).map(|b| b.tokens)
+                }
+                _ => None,
+            })
+            .sum();
+        // Should free at most the soft target (10k), blocks are 500 each
         assert!(
-            archive_count <= MAX_SOFT_ARCHIVAL,
-            "Soft budget pressure should limit to {MAX_SOFT_ARCHIVAL} archives, got {archive_count}"
+            archive_count > 0,
+            "Should archive at least one block at soft pressure"
+        );
+        assert!(
+            archived_tokens <= 10_500,
+            "Soft pressure should free approximately 10k tokens, got {archived_tokens}"
         );
     }
 
@@ -732,6 +957,123 @@ mod tests {
         assert!(mutations.is_empty());
     }
 
+    // ── Tool Lifecycle Block Archival ─────────────────────────
+
+    #[test]
+    fn test_tool_lifecycle_blocks_protected_at_soft_pressure() {
+        let blocks = vec![
+            make_block_with_role("tool_use", Role::ToolUse, BuiltInZone::Middle, 500, 1),
+            make_block_with_role("tool_result", Role::ToolResult, BuiltInZone::Middle, 500, 2),
+            make_block("assistant_regular", BuiltInZone::Middle, 1500, 0),
+        ];
+
+        // Soft pressure — tool blocks should be protected
+        let budget = mock_budget(90_000, 200_000);
+        let config = PlannerConfig::default();
+        let mutations = apply_heuristics(
+            &blocks,
+            &budget,
+            &default_signals(20),
+            &config,
+            &HashSet::new(),
+        );
+
+        let archived_ids: Vec<&str> = mutations
+            .iter()
+            .filter_map(|m| match m {
+                ContextMutation::Archive { block_id } => Some(block_id.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(!archived_ids.contains(&"tool_use"));
+        assert!(!archived_ids.contains(&"tool_result"));
+        assert!(archived_ids.contains(&"assistant_regular"));
+    }
+
+    #[test]
+    fn test_tool_lifecycle_blocks_archived_at_hard_pressure() {
+        let blocks = vec![
+            make_block_with_role("tool_use", Role::ToolUse, BuiltInZone::Middle, 5000, 1),
+            make_block_with_role(
+                "tool_result",
+                Role::ToolResult,
+                BuiltInZone::Middle,
+                10_000,
+                2,
+            ),
+            make_block("assistant_regular", BuiltInZone::Middle, 1500, 0),
+        ];
+
+        // Hard pressure (>= 80% utilization) — Middle-zone tool blocks should be archived
+        let budget = mock_budget(170_000, 200_000);
+        let config = PlannerConfig::default();
+        let mutations = apply_heuristics(
+            &blocks,
+            &budget,
+            &default_signals(20),
+            &config,
+            &HashSet::new(),
+        );
+
+        let archived_ids: Vec<&str> = mutations
+            .iter()
+            .filter_map(|m| match m {
+                ContextMutation::Archive { block_id } => Some(block_id.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            archived_ids.contains(&"tool_use"),
+            "Middle-zone tool_use should be archived at hard pressure"
+        );
+        assert!(
+            archived_ids.contains(&"tool_result"),
+            "Middle-zone tool_result should be archived at hard pressure"
+        );
+        assert!(archived_ids.contains(&"assistant_regular"));
+    }
+
+    #[test]
+    fn test_tool_lifecycle_blocks_in_recency_still_protected() {
+        let blocks = vec![
+            make_block_with_role("tool_use", Role::ToolUse, BuiltInZone::Recency, 5000, 8),
+            make_block_with_role(
+                "tool_result",
+                Role::ToolResult,
+                BuiltInZone::Recency,
+                10_000,
+                9,
+            ),
+        ];
+
+        // Hard pressure — but Recency-zone tool blocks should still be safe
+        let budget = mock_budget(190_000, 200_000);
+        let config = PlannerConfig::default();
+        let mutations = apply_heuristics(
+            &blocks,
+            &budget,
+            &default_signals(20),
+            &config,
+            &HashSet::new(),
+        );
+
+        let archived_ids: Vec<&str> = mutations
+            .iter()
+            .filter_map(|m| match m {
+                ContextMutation::Archive { block_id } => Some(block_id.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            !archived_ids.contains(&"tool_use"),
+            "Recency-zone tool blocks should be protected even at emergency pressure"
+        );
+        assert!(!archived_ids.contains(&"tool_result"));
+    }
+
     // ── Edge Cases ───────────────────────────────────────────
 
     #[test]
@@ -749,6 +1091,61 @@ mod tests {
         );
 
         assert!(mutations.is_empty());
+    }
+
+    #[test]
+    fn test_thinking_blocks_never_archived() {
+        let blocks = vec![
+            make_block_with_role("thinking1", Role::Thinking, BuiltInZone::Middle, 2000, 1),
+            make_block("assistant1", BuiltInZone::Middle, 500, 2),
+        ];
+        // Hard pressure — everything archivable should be archived
+        let budget = mock_budget(170_000, 200_000);
+        let config = PlannerConfig::default();
+
+        let mutations = apply_heuristics(
+            &blocks,
+            &budget,
+            &default_signals(20),
+            &config,
+            &HashSet::new(),
+        );
+
+        let archived_ids: Vec<&str> = mutations
+            .iter()
+            .filter_map(|m| match m {
+                ContextMutation::Archive { block_id } => Some(block_id.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            !archived_ids.contains(&"thinking1"),
+            "Thinking blocks must never be archived"
+        );
+        assert!(archived_ids.contains(&"assistant1"));
+    }
+
+    #[test]
+    fn test_thinking_blocks_excluded_from_archival_candidates() {
+        let blocks = vec![
+            make_block_with_role("thinking1", Role::Thinking, BuiltInZone::Middle, 2000, 0),
+            make_block("assistant1", BuiltInZone::Middle, 500, 0),
+        ];
+        let budget = mock_budget(90_000, 200_000);
+        let config = PlannerConfig {
+            staleness_turn_threshold: 5,
+            ..PlannerConfig::default()
+        };
+
+        let suggestions =
+            collect_archival_candidates(&blocks, &budget, &default_signals(10), &config);
+
+        let suggestion_ids: Vec<&str> = suggestions.iter().map(|s| s.block_id.as_str()).collect();
+        assert!(
+            !suggestion_ids.contains(&"thinking1"),
+            "Thinking blocks must not appear in archival candidates"
+        );
     }
 
     #[test]
@@ -780,5 +1177,45 @@ mod tests {
         );
 
         assert!(!mutations.is_empty()); // Should trigger soft archival
+    }
+
+    #[test]
+    fn test_token_based_medium_pressure_frees_proportional_tokens() {
+        // Create many small blocks in Middle zone
+        let blocks: Vec<Block> = (0..50)
+            .map(|i| make_block(&format!("b{i}"), BuiltInZone::Middle, 1000, i))
+            .collect();
+
+        // 70% utilization (medium pressure)
+        let budget = mock_budget(140_000, 200_000);
+        let config = PlannerConfig {
+            staleness_turn_threshold: 100, // disable staleness
+            ..PlannerConfig::default()
+        };
+
+        let mutations = apply_heuristics(
+            &blocks,
+            &budget,
+            &default_signals(60),
+            &config,
+            &HashSet::new(),
+        );
+
+        let archived_tokens: u32 = mutations
+            .iter()
+            .filter_map(|m| match m {
+                ContextMutation::Archive { block_id } => {
+                    blocks.iter().find(|b| b.id == *block_id).map(|b| b.tokens)
+                }
+                _ => None,
+            })
+            .sum();
+
+        // Medium target: 15% of 200k = 30k tokens
+        // Should free approximately 30k (30 blocks * 1000 tokens each)
+        assert!(
+            archived_tokens >= 29_000 && archived_tokens <= 31_000,
+            "Medium pressure should free ~30k tokens, got {archived_tokens}"
+        );
     }
 }

@@ -1,6 +1,18 @@
 //! Shared utility functions used across proxy, engine, and terminal modules.
 
+use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use regex::Regex;
+
+/// Regex matching ANSI escape sequences: CSI sequences and OSC sequences.
+static ANSI_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\x1b\[[0-9;]*[A-Za-z]|\x1b\][^\x07]*\x07").unwrap());
+
+/// Strip ANSI escape codes (color, cursor, OSC) from a string.
+pub fn strip_ansi_codes(s: &str) -> String {
+    ANSI_RE.replace_all(s, "").into_owned()
+}
 
 /// Returns the current UTC time as an ISO 8601 string (e.g., "2026-02-10T14:30:00Z").
 ///
@@ -63,5 +75,36 @@ mod tests {
     #[test]
     fn test_unix_epoch() {
         assert_eq!(unix_secs_to_iso(0), "1970-01-01T00:00:00Z");
+    }
+
+    // ── ANSI Stripping ──────────────────────────────────────
+
+    #[test]
+    fn test_strip_ansi_color_codes() {
+        let input = "\x1b[31mError:\x1b[0m file not found";
+        assert_eq!(strip_ansi_codes(input), "Error: file not found");
+    }
+
+    #[test]
+    fn test_strip_ansi_noop_on_clean_string() {
+        let input = "No escape codes here";
+        assert_eq!(strip_ansi_codes(input), input);
+    }
+
+    #[test]
+    fn test_strip_ansi_mixed_codes() {
+        let input = "\x1b[1;32m✓\x1b[0m Pass \x1b[33mwarning\x1b[0m end";
+        assert_eq!(strip_ansi_codes(input), "✓ Pass warning end");
+    }
+
+    #[test]
+    fn test_strip_ansi_empty_string() {
+        assert_eq!(strip_ansi_codes(""), "");
+    }
+
+    #[test]
+    fn test_strip_ansi_codes_only() {
+        let input = "\x1b[31m\x1b[0m";
+        assert_eq!(strip_ansi_codes(input), "");
     }
 }

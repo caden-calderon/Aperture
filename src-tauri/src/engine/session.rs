@@ -25,6 +25,10 @@ pub struct Session {
     pub exchange_count: u32,
     /// Total tokens used across all blocks in this session.
     pub total_tokens: u32,
+    /// Estimated token overhead from tool definitions and other non-message
+    /// content that the LLM counts toward context. Updated each ingest.
+    #[serde(default)]
+    pub overhead_tokens: u32,
 }
 
 /// Summary info for session listing (without block IDs).
@@ -41,6 +45,9 @@ pub struct SessionInfo {
     pub exchange_count: u32,
     pub total_tokens: u32,
     pub token_budget: u32,
+    /// Estimated token overhead from tool definitions (not tracked as blocks).
+    #[serde(default)]
+    pub overhead_tokens: u32,
 }
 
 impl Session {
@@ -63,6 +70,7 @@ impl Session {
             block_ids: Vec::new(),
             exchange_count: 0,
             total_tokens: 0,
+            overhead_tokens: 0,
         }
     }
 
@@ -78,6 +86,7 @@ impl Session {
             exchange_count: self.exchange_count,
             total_tokens: self.total_tokens,
             token_budget: self.token_budget,
+            overhead_tokens: self.overhead_tokens,
         }
     }
 
@@ -104,6 +113,11 @@ impl SessionStore {
     }
 
     /// Create a new session and set it as active.
+    ///
+    /// Guard: if an active session exists with significant content (>1000 tokens),
+    /// a new session with a much smaller budget indication won't steal active status.
+    /// This prevents auxiliary model calls (e.g. Haiku topic classifier) from
+    /// flipping the active session away from the main conversation.
     pub fn create(
         &self,
         id: String,
@@ -115,14 +129,34 @@ impl SessionStore {
     ) -> String {
         let session = Session::new(
             id.clone(),
-            provider,
-            model,
+            provider.clone(),
+            model.clone(),
             source,
             thread_identity,
             token_budget,
         );
         self.sessions.insert(id.clone(), session);
-        *self.active_id.lock().expect("active_id lock poisoned") = Some(id.clone());
+
+        // Only flip active session if there isn't already a substantial one.
+        // This prevents tiny auxiliary sessions (topic classifiers, ~120 tokens)
+        // from stealing active status from the main conversation.
+        let should_activate = {
+            let current_active = self.active();
+            match current_active {
+                None => true,
+                Some(active) => {
+                    // If active session is small or same provider+model, allow flip
+                    let active_is_small = active.total_tokens < 1000;
+                    let same_model =
+                        active.provider == provider && active.model == model;
+                    active_is_small || same_model
+                }
+            }
+        };
+
+        if should_activate {
+            *self.active_id.lock().expect("active_id lock poisoned") = Some(id.clone());
+        }
         id
     }
 

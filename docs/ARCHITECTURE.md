@@ -2,6 +2,8 @@
 
 > Universal LLM context visualization, management, and control proxy.
 
+Last updated: 2026-02-19
+
 ---
 
 ## High-Level Overview
@@ -21,11 +23,10 @@ AI Coding Tool (Claude Code, Codex, etc.)
 │  │  1. Ingest                 │  │
 │  │  2. Parse to blocks        │  │
 │  │  3. Zone assignment        │  │
-│  │  4. Staged injection       │  │
-│  │  5. Auto-condensation      │  │
-│  │  6. Budget enforcement     │  │
-│  │  7. Reorder by zone        │  │
-│  │  8. Emit                   │  │
+│  │  4. Planner decisions      │  │
+│  │  5. JSON rewriting         │  │
+│  │  6. Budget/guardrails      │  │
+│  │  7. Ingest + emit          │  │
 │  └────────────────────────────┘  │
 │                                  │
 │  Modified request ──────────────►│──► Actual API
@@ -65,10 +66,14 @@ The HTTP proxy that intercepts all API traffic.
 **Critical path:** Must be fast. Target <5ms overhead for non-LLM operations.
 
 **Key modules:**
-- `proxy/server.rs` — axum HTTP server
-- `proxy/handlers.rs` — Route handlers
-- `proxy/streaming.rs` — SSE stream handling
-- `proxy/client.rs` — Upstream API client
+- `proxy/mod.rs` — server bootstrap and shared proxy state
+- `proxy/handler.rs` + `proxy/handler/*` — request flow orchestration (routing/header filtering/exchange finalization helpers)
+- `proxy/parser/*` — provider wire parsing and canonical block extraction
+- `proxy/rewriter.rs` + `proxy/rewriter/*` — planner-driven JSON mutation/sanitization/injection
+- `proxy/interceptor.rs` + `proxy/interceptor/*` — context-tool interception and bounded re-invoke flow
+- `proxy/capture.rs` + `proxy/capture/*` — request/response capture store and SSE final-response reconstruction
+- `proxy/context_api.rs` — internal `/_aperture/*` tool API
+- `mcp/server.rs` — MCP JSON-RPC runtime used by `aperture_mcp` bin
 
 ### 2. Context Engine (Rust)
 
@@ -83,11 +88,11 @@ The brain that manages context state.
 - Coordinate with cleaner model sidecar
 
 **Key modules:**
-- `engine/block.rs` — Block data structure
-- `engine/zone.rs` — Zone management
-- `engine/pipeline.rs` — Processing pipeline
-- `engine/rules.rs` — Rule engine
-- `engine/snapshots.rs` — Snapshot management
+- `engine/mod.rs` — engine entrypoints and public orchestration
+- `engine/ingest.rs` — ingest lifecycle and regressive-capture protections
+- `engine/session_sync.rs` — session persistence/sync/event helpers
+- `engine/planner/*` — plan lifecycle, heuristic signals, mutation application, validation
+- `engine/block.rs`, `engine/zone.rs`, `engine/budget.rs`, `engine/storage.rs` — core state, zoning, token budgeting, persistence
 
 ### 3. UI Layer (Svelte 5 / Tauri)
 

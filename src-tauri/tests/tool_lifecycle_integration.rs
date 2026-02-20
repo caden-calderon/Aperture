@@ -15,6 +15,8 @@ use aperture_lib::metacog::{detect_runtime, RuntimeKind};
 use aperture_lib::proxy::parser::{parse_request, parse_response, Provider};
 use aperture_lib::proxy::rewriter::rewrite_request;
 
+const TEST_THREAD_ID: &str = "tool-lifecycle-thread";
+
 /// Helper to build a block with sensible defaults.
 fn make_block(role: Role, content: &str, turn_index: u32) -> Block {
     let tokens = std::cmp::max((content.len() as u32) / 4, 1);
@@ -64,6 +66,7 @@ fn anthropic_request_json(turns: usize) -> serde_json::Value {
     }
     serde_json::json!({
         "model": "claude-sonnet-4-5-20250929",
+        "thread_id": TEST_THREAD_ID,
         "max_tokens": 1024,
         "system": "You are a helpful assistant.",
         "messages": messages
@@ -85,6 +88,7 @@ fn openai_chat_request_json(turns: usize, stream: bool) -> serde_json::Value {
     }
     let mut json = serde_json::json!({
         "model": "gpt-4.1",
+        "thread_id": TEST_THREAD_ID,
         "messages": messages
     });
     if stream {
@@ -106,6 +110,7 @@ fn openai_responses_request_json(turns: usize, stream: bool) -> serde_json::Valu
     }
     let mut json = serde_json::json!({
         "model": "gpt-4.1",
+        "thread_id": TEST_THREAD_ID,
         "instructions": "You are a helpful assistant.",
         "input": input
     });
@@ -140,10 +145,11 @@ fn ingest_turns(engine: &ContextEngine, provider: &str, model: &str, turns: usiz
     engine.ingest(
         provider,
         model,
-        "test",
-        None,
+        "proxy",
+        Some(TEST_THREAD_ID),
         request_blocks,
         response_blocks,
+        0,
     );
 }
 
@@ -168,17 +174,18 @@ fn anthropic_full_lifecycle_claude_mcp() {
     let runtime_kind = detect_runtime(path, &parsed.provider.to_string());
     assert_eq!(runtime_kind, RuntimeKind::ClaudeMcp);
 
-    // Rewrite — should inject manifest but NOT inline tools (ClaudeMcp uses MCP transport)
-    let result = rewrite_request(&body, path, &parsed, &engine);
+    // Rewrite — should inject manifest into last user message (cache-safe),
+    // NOT inline tools (ClaudeMcp uses MCP transport)
+    let result = rewrite_request(&body, path, &parsed, &engine, &parsed.blocks);
     match result {
         Ok(Some(rewritten)) => {
             let rewritten_json: serde_json::Value = serde_json::from_slice(&rewritten).unwrap();
 
-            // Manifest should be injected into system message
+            // System message should be UNCHANGED (cache-safe — never modify system)
             let system = rewritten_json.get("system").and_then(|v| v.as_str());
             assert!(
                 system.is_some(),
-                "Rewritten body should have a system field"
+                "Rewritten body should still have its original system field"
             );
 
             // Messages should still exist
@@ -225,7 +232,7 @@ fn codex_chat_tool_injection_non_streaming() {
     );
 
     // Rewrite — should inject tools
-    let rewritten = rewrite_request(&body, path, &parsed, &engine)
+    let rewritten = rewrite_request(&body, path, &parsed, &engine, &parsed.blocks)
         .unwrap()
         .expect("non-streaming chat request should be rewritten with tool definitions");
     let rewritten_json: serde_json::Value = serde_json::from_slice(&rewritten).unwrap();
@@ -272,7 +279,7 @@ fn codex_responses_tool_injection_non_streaming() {
     assert_eq!(runtime_kind, RuntimeKind::CodexProxy);
 
     // Rewrite
-    let rewritten = rewrite_request(&body, path, &parsed, &engine)
+    let rewritten = rewrite_request(&body, path, &parsed, &engine, &parsed.blocks)
         .unwrap()
         .expect("non-streaming responses request should be rewritten with tool definitions");
     let rewritten_json: serde_json::Value = serde_json::from_slice(&rewritten).unwrap();
@@ -294,8 +301,7 @@ fn codex_responses_tool_injection_non_streaming() {
         "Responses API should have aperture_context tools"
     );
 
-    // Instructions (system prompt) should contain manifest
-    // (may be injected into existing instructions)
+    // Instructions should be UNCHANGED (manifest goes to last user message, not instructions)
     assert!(
         rewritten_json.get("input").is_some(),
         "Input array should still be present"
@@ -318,7 +324,7 @@ fn streaming_request_no_tools() {
     assert!(parsed.stream, "Should detect stream=true");
 
     // Rewrite — tools should NOT be injected for streaming
-    let result = rewrite_request(&body, path, &parsed, &engine).unwrap();
+    let result = rewrite_request(&body, path, &parsed, &engine, &parsed.blocks).unwrap();
     if let Some(rewritten) = result {
         let rewritten_json: serde_json::Value = serde_json::from_slice(&rewritten).unwrap();
 
@@ -350,7 +356,7 @@ fn streaming_request_no_tools() {
     let parsed = parse_request(path, &body).unwrap();
     assert!(parsed.stream, "Should detect stream=true in responses");
 
-    let result = rewrite_request(&body, path, &parsed, &engine).unwrap();
+    let result = rewrite_request(&body, path, &parsed, &engine, &parsed.blocks).unwrap();
     if let Some(rewritten) = result {
         let body_str = String::from_utf8_lossy(&rewritten);
         // Tools should not appear in streaming requests
@@ -386,7 +392,7 @@ fn first_turn_no_tools() {
     );
 
     // Rewrite — may produce manifest but no tools
-    let result = rewrite_request(&body, path, &parsed, &engine).unwrap();
+    let result = rewrite_request(&body, path, &parsed, &engine, &parsed.blocks).unwrap();
     if let Some(rewritten) = result {
         let body_str = String::from_utf8_lossy(&rewritten);
         assert!(
@@ -478,10 +484,11 @@ fn budget_pressure_archival_round_trip() {
         engine.ingest(
             "openai",
             "gpt-4.1",
-            "test",
-            None,
+            "proxy",
+            Some(TEST_THREAD_ID),
             vec![user],
             vec![assistant],
+            0,
         );
     }
 
@@ -492,6 +499,7 @@ fn budget_pressure_archival_round_trip() {
     // and should not crash or produce invalid mutations
     let input = aperture_lib::engine::planner::types::PlannerInput {
         blocks: blocks.clone(),
+        request_block_ids: blocks.iter().map(|b| b.id.clone()).collect(),
         pending_plan: None,
         signals: aperture_lib::engine::planner::types::HeuristicSignals {
             budget_status: Some(budget.clone()),
@@ -569,8 +577,8 @@ fn file_mutation_propagation_round_trip() {
     engine.ingest(
         "openai",
         "gpt-4.1",
-        "test",
-        None,
+        "proxy",
+        Some(TEST_THREAD_ID),
         vec![
             make_block(Role::System, "System prompt", 0),
             make_block(Role::User, "Read auth.rs", 1),
@@ -581,6 +589,7 @@ fn file_mutation_propagation_round_trip() {
             "Here are the contents of auth.rs",
             3,
         )],
+        0,
     );
 
     // Simulate a file mutation: edit_file("auth.rs")
@@ -642,6 +651,7 @@ fn durable_mutations_persist_across_multiple_turns() {
     // Initial exchange establishes baseline blocks in engine state.
     let initial_request = serde_json::json!({
         "model": "gpt-4.1",
+        "thread_id": TEST_THREAD_ID,
         "messages": [
             { "role": "system", "content": "You are helpful." },
             { "role": "user", "content": "Original block that should be compressed." },
@@ -663,13 +673,14 @@ fn durable_mutations_persist_across_multiple_turns() {
     let initial_response = parse_response(initial_parsed.provider, path, &initial_response_body)
         .expect("parse initial response");
 
-    engine.ingest(
+    let initial_ingest = engine.ingest(
         &initial_parsed.provider.to_string(),
         &initial_parsed.model,
-        "test",
-        None,
+        "proxy",
+        initial_parsed.thread_identity.as_deref(),
         initial_parsed.blocks,
         initial_response.blocks,
+        0,
     );
 
     let baseline_blocks = engine.active_session_blocks();
@@ -693,24 +704,28 @@ fn durable_mutations_persist_across_multiple_turns() {
         b.metadata.file_paths = vec!["src/auth.rs".to_string()];
     });
 
-    engine.planner.set_pending_plan(PendingPlan {
-        mutations: vec![
-            ContextMutation::Compress {
-                block_id: compress_id,
-                summary: "Compressed summary for the original user context.".to_string(),
-            },
-            ContextMutation::Archive {
-                block_id: archive_id,
-            },
-        ],
-        token_delta: -100,
-        projected_block_count: baseline_blocks.len().saturating_sub(1),
-        projected_utilization: 0.2,
-    });
+    engine.planner.set_pending_plan_for_session(
+        &initial_ingest.session_id,
+        PendingPlan {
+            mutations: vec![
+                ContextMutation::Compress {
+                    block_id: compress_id,
+                    summary: "Compressed summary for the original user context.".to_string(),
+                },
+                ContextMutation::Archive {
+                    block_id: archive_id,
+                },
+            ],
+            token_delta: -100,
+            projected_block_count: baseline_blocks.len().saturating_sub(1),
+            projected_utilization: 0.2,
+        },
+    );
 
     // Turn 1 with real tool traffic: edit_file call + tool result.
     let turn_one_request = serde_json::json!({
         "model": "gpt-4.1",
+        "thread_id": TEST_THREAD_ID,
         "messages": [
             { "role": "system", "content": "You are helpful." },
             { "role": "user", "content": "Original block that should be compressed." },
@@ -738,9 +753,15 @@ fn durable_mutations_persist_across_multiple_turns() {
     let turn_one_body = serde_json::to_vec(&turn_one_request).expect("serialize turn one request");
     let turn_one_parsed = parse_request(path, &turn_one_body).expect("parse turn one request");
 
-    let rewritten_one = rewrite_request(&turn_one_body, path, &turn_one_parsed, &engine)
-        .expect("rewrite turn one")
-        .expect("turn one should be rewritten");
+    let rewritten_one = rewrite_request(
+        &turn_one_body,
+        path,
+        &turn_one_parsed,
+        &engine,
+        &turn_one_parsed.blocks,
+    )
+    .expect("rewrite turn one")
+    .expect("turn one should be rewritten");
     let rewritten_one_json: serde_json::Value =
         serde_json::from_slice(&rewritten_one).expect("parse rewritten turn one");
 
@@ -774,10 +795,11 @@ fn durable_mutations_persist_across_multiple_turns() {
     engine.ingest(
         &rewritten_one_parsed.provider.to_string(),
         &rewritten_one_parsed.model,
-        "test",
-        None,
+        "proxy",
+        rewritten_one_parsed.thread_identity.as_deref(),
         rewritten_one_parsed.blocks,
         turn_one_response.blocks,
+        0,
     );
 
     // Turn 2 round-trip: no new plan, verify previous mutations remain persisted.
@@ -789,9 +811,15 @@ fn durable_mutations_persist_across_multiple_turns() {
 
     let turn_two_body = serde_json::to_vec(&turn_two_request).expect("serialize turn two request");
     let turn_two_parsed = parse_request(path, &turn_two_body).expect("parse turn two request");
-    let rewritten_two = rewrite_request(&turn_two_body, path, &turn_two_parsed, &engine)
-        .expect("rewrite turn two")
-        .unwrap_or_else(|| bytes::Bytes::from(turn_two_body.clone()));
+    let rewritten_two = rewrite_request(
+        &turn_two_body,
+        path,
+        &turn_two_parsed,
+        &engine,
+        &turn_two_parsed.blocks,
+    )
+    .expect("rewrite turn two")
+    .unwrap_or_else(|| bytes::Bytes::from(turn_two_body.clone()));
 
     let rewritten_two_parsed =
         parse_request(path, &rewritten_two).expect("parse rewritten turn two request");
@@ -809,10 +837,11 @@ fn durable_mutations_persist_across_multiple_turns() {
     engine.ingest(
         &rewritten_two_parsed.provider.to_string(),
         &rewritten_two_parsed.model,
-        "test",
-        None,
+        "proxy",
+        rewritten_two_parsed.thread_identity.as_deref(),
         rewritten_two_parsed.blocks,
         turn_two_response.blocks,
+        0,
     );
 
     let final_blocks = engine.active_session_blocks();

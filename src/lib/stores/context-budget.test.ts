@@ -165,4 +165,26 @@ describe("block mutation notifications", () => {
 
     toastSpy.mockRestore();
   });
+
+  it("treats session replacement as archival when block IDs are unrelated (current behavior)", () => {
+    contextStore.setActiveEngineSession("session-a");
+    contextStore.setEngineBlocks([
+      makeBlock("a1", "user", "Session A message", 10),
+      makeBlock("a2", "assistant", "Session A reply", 12),
+    ]);
+
+    const toastSpy = vi.spyOn(uiStore, "showToast");
+
+    // Simulate backend active-session flip: new session payload has unrelated IDs.
+    contextStore.setActiveEngineSession("session-b");
+    contextStore.setEngineBlocks([
+      makeBlock("b1", "user", "Session B message", 11),
+    ]);
+
+    expect(toastSpy).toHaveBeenCalled();
+    expect(toastSpy.mock.calls[0][0]).toContain("archived");
+    expect(toastSpy.mock.calls[0][1]).toBe("info");
+
+    toastSpy.mockRestore();
+  });
 });

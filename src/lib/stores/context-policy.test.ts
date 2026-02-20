@@ -182,4 +182,44 @@ describe("context store engine policy gating", () => {
       })
     );
   });
+
+  it("does not clear engine context when confirmation is required and user cancels", async () => {
+    const beforeCount = contextStore.blocks.length;
+    expect(beforeCount).toBeGreaterThan(0);
+
+    invokeMock.mockResolvedValueOnce(
+      JSON.stringify({ decision: "require_confirmation", reason: "destructive action" })
+    );
+    const confirmMock = vi.fn().mockReturnValue(false);
+    vi.stubGlobal("confirm", confirmMock);
+
+    const result = await contextStore.clearEngineContext();
+
+    expect(result.applied).toBe(false);
+    expect(result.decision).toBe("require_confirmation");
+    expect(contextStore.blocks.length).toBe(beforeCount);
+    expect(confirmMock).toHaveBeenCalledOnce();
+  });
+
+  it("clears engine context after confirmed policy approval", async () => {
+    expect(contextStore.blocks.length).toBeGreaterThan(0);
+
+    invokeMock
+      .mockResolvedValueOnce(
+        JSON.stringify({ decision: "require_confirmation", reason: "destructive action" })
+      )
+      .mockResolvedValueOnce(JSON.stringify({ decision: "allow" }));
+    const confirmMock = vi.fn().mockReturnValue(true);
+    vi.stubGlobal("confirm", confirmMock);
+
+    const result = await contextStore.clearEngineContext();
+
+    expect(result.applied).toBe(true);
+    expect(contextStore.blocks.length).toBe(0);
+    expect(invokeMock).toHaveBeenNthCalledWith(
+      2,
+      "engine_clear_context",
+      expect.objectContaining({ confirmed: true })
+    );
+  });
 });

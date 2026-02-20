@@ -11,6 +11,8 @@
 
   let ceiling = $state(contextStore.budgetCeiling * 100);
   let compression = $state(contextStore.compressionSettings);
+  let clearingContext = $state(false);
+  let clearContextMessage = $state<string | null>(null);
 
   // Derived threshold markers from ceiling
   let thresholds = $derived(plannerThresholdsFromCeilingPercent(ceiling));
@@ -48,6 +50,17 @@
     const maxTokens = Math.round(parseFloat((e.target as HTMLInputElement).value));
     compression = { ...compression, maxTokens };
     await contextStore.updateCompressionSettings({ maxTokens });
+  }
+
+  async function handleClearEngineContext() {
+    if (clearingContext) return;
+    clearingContext = true;
+    clearContextMessage = null;
+    const result = await contextStore.clearEngineContext();
+    clearingContext = false;
+    clearContextMessage = result.applied
+      ? "Cleared archived/live engine context."
+      : (result.reason ?? "Context clear was cancelled.");
   }
 
   // Sync from store if externally changed
@@ -180,6 +193,23 @@
         <p class="section-hint">
           Sidekick compression is fail-open. If unavailable, existing planner behavior is preserved.
         </p>
+      </section>
+
+      <section class="settings-section">
+        <h3 class="section-title">Context Reset</h3>
+        <button
+          class="danger-button"
+          onclick={handleClearEngineContext}
+          disabled={clearingContext}
+        >
+          {clearingContext ? "Clearing..." : "Clear Archive + Sessions"}
+        </button>
+        <p class="section-hint">
+          Purges all in-memory engine sessions/context for a clean restart. Fail-open proxy behavior is unchanged.
+        </p>
+        {#if clearContextMessage}
+          <p class="section-hint">{clearContextMessage}</p>
+        {/if}
       </section>
     </div>
   </div>
@@ -386,5 +416,26 @@
     padding: 4px 6px;
     font-size: 11px;
     font-family: var(--font-mono);
+  }
+
+  .danger-button {
+    width: 100%;
+    background: color-mix(in srgb, var(--semantic-danger) 24%, var(--bg-inset));
+    border: 1px solid color-mix(in srgb, var(--semantic-danger) 55%, var(--border-default));
+    color: var(--text-primary);
+    border-radius: 4px;
+    padding: 6px 8px;
+    font-size: 11px;
+    font-family: var(--font-mono);
+    cursor: pointer;
+  }
+
+  .danger-button:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--semantic-danger) 32%, var(--bg-inset));
+  }
+
+  .danger-button:disabled {
+    opacity: 0.6;
+    cursor: default;
   }
 </style>

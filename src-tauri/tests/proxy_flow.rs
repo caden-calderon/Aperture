@@ -455,13 +455,14 @@ async fn test_capture_uses_rewritten_request_semantics() {
     .expect("serialize seed response");
     let parsed_seed_response =
         parse_response(parsed_seed.provider, path, &seed_response).expect("parse seed response");
-    engine.ingest(
+    let seed_ingest = engine.ingest(
         &parsed_seed.provider.to_string(),
         &parsed_seed.model,
         "proxy",
-        None,
+        parsed_seed.thread_identity.as_deref(),
         parsed_seed.blocks,
         parsed_seed_response.blocks,
+        0,
     );
 
     let blocks = engine.active_session_blocks();
@@ -476,20 +477,23 @@ async fn test_capture_uses_rewritten_request_semantics() {
         .map(|b| b.id.clone())
         .expect("archive target");
 
-    engine.planner.set_pending_plan(PendingPlan {
-        mutations: vec![
-            ContextMutation::Compress {
-                block_id: compress_id,
-                summary: "compressed request content".to_string(),
-            },
-            ContextMutation::Archive {
-                block_id: archive_id,
-            },
-        ],
-        token_delta: -50,
-        projected_block_count: blocks.len().saturating_sub(1),
-        projected_utilization: 0.2,
-    });
+    engine.planner.set_pending_plan_for_session(
+        &seed_ingest.session_id,
+        PendingPlan {
+            mutations: vec![
+                ContextMutation::Compress {
+                    block_id: compress_id,
+                    summary: "compressed request content".to_string(),
+                },
+                ContextMutation::Archive {
+                    block_id: archive_id,
+                },
+            ],
+            token_delta: -50,
+            projected_block_count: blocks.len().saturating_sub(1),
+            projected_utilization: 0.2,
+        },
+    );
 
     let (proxy_port, state) = start_test_proxy_with_engine(&upstream_url, engine).await;
 

@@ -150,6 +150,7 @@ impl SqliteStorage {
                     token_budget: row.get(4)?,
                     exchange_count: row.get(5)?,
                     total_tokens: row.get(6)?,
+                    overhead_tokens: 0,
                     block_ids: Vec::new(), // populated from blocks table
                 })
             })

@@ -2,7 +2,7 @@
 
 > Universal LLM context visualization, management, and control proxy.
 
-**Status:** Active development (post-audit hardening + Phase 1 foundation work in progress)
+**Status:** Active development (Phase 4 refactor-first cleanup complete; targeted bug-dive in progress)
 
 ## What It Is
 
@@ -36,11 +36,16 @@ make test
 
 ## Documentation
 
-- `docs/ARCHITECTURE.md` — System architecture
-- `docs/INTEGRATION.md` — Frontend/backend integration and IPC contracts
-- `docs/SECURITY_BASELINE.md` — Security constraints and hardening baseline
-- `dev/active/audit-2026-02-08/` — Latest audit execution docs and reports
-- `docs/archive/APERTURE-brainstorm.md` — Original brainstorming/design doc (archived)
+- `docs/DOCS_INDEX.md` — canonical docs navigation map (start here)
+- `docs/HACKATHON_SUBMISSION.md` — concise submission/demo snapshot and known issues
+- `docs/ARCHITECTURE.md` — system architecture
+- `docs/INTEGRATION.md` — frontend/backend integration and IPC contracts
+- `docs/SECURITY_BASELINE.md` — security constraints and hardening baseline
+- `docs/REPO_STRUCTURE.md` — repo layout and ownership map
+- `docs/DOC_LIFECYCLE.md` — documentation lifecycle, naming, and archive rules
+- `dev/active/README.md` — active workstream index
+- `.context/RESUME.md` — session resume entrypoint for active implementation context
+- `.context/README.md` — working-memory notes classification
 
 ## License
 

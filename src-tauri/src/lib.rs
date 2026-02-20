@@ -7,6 +7,7 @@
 
 pub mod engine;
 pub mod events;
+pub mod mcp;
 pub mod metacog;
 pub mod proxy;
 pub mod terminal;
@@ -309,6 +310,16 @@ fn engine_update_compression_settings(
     state.set_compression_settings(settings);
 }
 
+/// Tauri command: Clear all engine sessions and context blocks.
+#[tauri::command]
+fn engine_clear_context(
+    state: tauri::State<'_, Arc<ContextEngine>>,
+    confirmed: Option<bool>,
+) -> Result<String, String> {
+    let decision = state.clear_all_sessions(confirmed.unwrap_or(false))?;
+    Ok(serde_json::to_string(&decision).unwrap_or_default())
+}
+
 /// Parse a zone string into a Zone enum.
 fn parse_zone(zone: &str) -> engine::types::Zone {
     use engine::types::{BuiltInZone, Zone};
@@ -422,6 +433,7 @@ pub fn run() {
             engine_get_budget_ceiling,
             engine_get_compression_settings,
             engine_update_compression_settings,
+            engine_clear_context,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

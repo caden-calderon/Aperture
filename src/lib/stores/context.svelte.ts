@@ -831,6 +831,21 @@ function clearBlocks(): void {
   markDirty();
 }
 
+/** Purge all engine sessions/context and reset the live working state. */
+async function clearEngineContext(): Promise<MutationOutcome> {
+  const permission = await ensureMutationAllowed("engine_clear_context", {});
+  if (!permission.applied) return permission;
+
+  blocks = [];
+  activeSnapshotId = null;
+  workingStateCache = null;
+  activeEngineSessionId = null;
+  _activeEngineThreadIdentity = null;
+  localHotPatchesBySession = {};
+  markDirty();
+  return appliedOutcome(1);
+}
+
 /** Replace blocks with engine-processed data (enriched with zones, tokens, heat). */
 function setEngineBlocks(newBlocks: Block[]): void {
   if (activeSnapshotId !== null) return; // Don't overwrite snapshot view
@@ -1099,6 +1114,7 @@ export const contextStore = {
   setContextMutationMode,
   setEngineBudget,
   clearBlocks,
+  clearEngineContext,
   appendResponseBlocks,
   getBlock,
   getBlockStaleness,

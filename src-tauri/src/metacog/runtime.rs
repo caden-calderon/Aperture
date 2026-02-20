@@ -56,9 +56,26 @@ pub struct CleanupResult {
 /// Prefix for all Aperture context tool names.
 pub const CONTEXT_TOOL_PREFIX: &str = "aperture_context_";
 
+/// MCP namespace prefix for Aperture context tools (Claude Code uses `mcp__<server>__<tool>`).
+pub const MCP_CONTEXT_TOOL_PREFIX: &str = "mcp__aperture__aperture_context_";
+
 /// Check whether a tool name is an Aperture context management tool.
+///
+/// Matches both bare names (`aperture_context_preview`) and MCP-namespaced
+/// names (`mcp__aperture__aperture_context_preview`) used by Claude Code.
 pub fn is_context_tool_name(name: &str) -> bool {
-    name.starts_with(CONTEXT_TOOL_PREFIX)
+    name.starts_with(CONTEXT_TOOL_PREFIX) || name.starts_with(MCP_CONTEXT_TOOL_PREFIX)
+}
+
+/// Check whether a tool name is a proxy-injected (interceptor) context tool.
+///
+/// Only matches bare names (`aperture_context_*`), NOT MCP-namespaced names.
+/// MCP tools (`mcp__aperture__aperture_context_*`) are managed by Claude Code
+/// and must remain in conversation history so the model remembers calling them.
+///
+/// Use this for cleanup/stripping — only interceptor tools should be stripped.
+pub fn is_intercepted_context_tool_name(name: &str) -> bool {
+    name.starts_with(CONTEXT_TOOL_PREFIX) && !name.starts_with(MCP_CONTEXT_TOOL_PREFIX)
 }
 
 /// The adapter interface for exposing context management tools to LLM clients.
@@ -115,8 +132,42 @@ pub enum RuntimeKind {
     Passive,
 }
 
+/// Whether context tools are fully enabled or forced into passive-only mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextToolsMode {
+    Enabled,
+    PassiveOnly,
+}
+
+fn parse_context_tools_mode(raw: Option<&str>) -> ContextToolsMode {
+    match raw {
+        Some(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "passive" | "disabled" | "off" => ContextToolsMode::PassiveOnly,
+            _ => ContextToolsMode::Enabled,
+        },
+        None => ContextToolsMode::Enabled,
+    }
+}
+
+/// Read global context-tools mode from environment.
+///
+/// `APERTURE_CONTEXT_TOOLS_MODE=passive` forces passive runtime and disables
+/// context tools without disabling the proxy itself.
+pub fn context_tools_mode() -> ContextToolsMode {
+    let raw = std::env::var("APERTURE_CONTEXT_TOOLS_MODE").ok();
+    parse_context_tools_mode(raw.as_deref())
+}
+
+pub fn context_tools_passive_only() -> bool {
+    matches!(context_tools_mode(), ContextToolsMode::PassiveOnly)
+}
+
 /// Detect the appropriate runtime from the API path and provider.
 pub fn detect_runtime(path: &str, provider: &str) -> RuntimeKind {
+    if context_tools_passive_only() {
+        return RuntimeKind::Passive;
+    }
+
     let path_lower = path.to_lowercase();
     let provider_lower = provider.to_lowercase();
 
@@ -191,10 +242,22 @@ pub fn context_tool_definitions() -> Vec<ContextToolDef> {
         },
         ContextToolDef {
             name: "aperture_context_plan".into(),
-            description: "Plan context changes: archive, compress, expand, pin, shift blocks. Changes are previewed and applied between turns. Last call wins.".into(),
+            description: "Strategic context planning tool. Stage or append context mutations, preview staged deltas, then commit once ready so all changes apply together between turns.".into(),
             parameters_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
+                    "control": {
+                        "type": "object",
+                        "properties": {
+                            "op": {
+                                "type": "string",
+                                "enum": ["stage", "append", "preview", "commit", "discard"],
+                                "description": "Planner control mode. Default: 'stage' when actions exist, otherwise 'preview'."
+                            }
+                        },
+                        "additionalProperties": false,
+                        "description": "Optional staged-planning control."
+                    },
                     "expand": {
                         "type": "array",
                         "items": {"type": "string"},
@@ -319,13 +382,60 @@ mod tests {
 
     #[test]
     fn test_is_context_tool_name() {
+        // Bare names (Codex proxy path)
         assert!(is_context_tool_name("aperture_context_preview"));
         assert!(is_context_tool_name("aperture_context_read"));
         assert!(is_context_tool_name("aperture_context_search"));
         assert!(is_context_tool_name("aperture_context_plan"));
         assert!(is_context_tool_name("aperture_context_status"));
+
+        // MCP-namespaced names (Claude Code path)
+        assert!(is_context_tool_name(
+            "mcp__aperture__aperture_context_preview"
+        ));
+        assert!(is_context_tool_name(
+            "mcp__aperture__aperture_context_read"
+        ));
+        assert!(is_context_tool_name(
+            "mcp__aperture__aperture_context_search"
+        ));
+        assert!(is_context_tool_name(
+            "mcp__aperture__aperture_context_plan"
+        ));
+        assert!(is_context_tool_name(
+            "mcp__aperture__aperture_context_status"
+        ));
+
+        // Non-context tools
         assert!(!is_context_tool_name("read_file"));
         assert!(!is_context_tool_name("aperture_other"));
+        assert!(!is_context_tool_name("mcp__github__create_issue"));
+        assert!(!is_context_tool_name("mcp__aperture__other_tool"));
         assert!(!is_context_tool_name(""));
+    }
+
+    #[test]
+    fn test_parse_context_tools_mode_defaults_enabled() {
+        assert_eq!(parse_context_tools_mode(None), ContextToolsMode::Enabled);
+        assert_eq!(
+            parse_context_tools_mode(Some("enabled")),
+            ContextToolsMode::Enabled
+        );
+    }
+
+    #[test]
+    fn test_parse_context_tools_mode_passive_variants() {
+        assert_eq!(
+            parse_context_tools_mode(Some("passive")),
+            ContextToolsMode::PassiveOnly
+        );
+        assert_eq!(
+            parse_context_tools_mode(Some("disabled")),
+            ContextToolsMode::PassiveOnly
+        );
+        assert_eq!(
+            parse_context_tools_mode(Some("off")),
+            ContextToolsMode::PassiveOnly
+        );
     }
 }

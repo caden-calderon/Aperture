@@ -8,7 +8,7 @@
 
 use serde_json::Value;
 
-use crate::metacog::runtime::{is_context_tool_name, CleanupResult};
+use crate::metacog::runtime::{is_intercepted_context_tool_name, CleanupResult};
 
 use super::types::ContextMutation;
 
@@ -91,7 +91,10 @@ pub fn strip_anthropic_context_tools(messages: &mut Value) -> CleanupResult {
         None => return CleanupResult::default(),
     };
 
-    // First pass: collect context tool_use IDs from assistant messages.
+    // First pass: collect interceptor context tool_use IDs from assistant messages.
+    // Only strip bare-prefix tools (proxy-injected). MCP-namespaced tools
+    // (mcp__aperture__*) are legitimate conversation entries and must be preserved
+    // so the model remembers calling them.
     let mut context_tool_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for msg in msgs.iter() {
@@ -105,7 +108,7 @@ pub fn strip_anthropic_context_tools(messages: &mut Value) -> CleanupResult {
         for block in content {
             if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
                 if let Some(name) = block.get("name").and_then(|n| n.as_str()) {
-                    if is_context_tool_name(name) {
+                    if is_intercepted_context_tool_name(name) {
                         if let Some(id) = block.get("id").and_then(|i| i.as_str()) {
                             context_tool_ids.insert(id.to_string());
                         }
@@ -122,7 +125,7 @@ pub fn strip_anthropic_context_tools(messages: &mut Value) -> CleanupResult {
     let mut tool_uses_stripped = 0usize;
     let mut tool_results_stripped = 0usize;
 
-    // Second pass: strip context tool_use blocks from assistant messages
+    // Second pass: strip interceptor context tool_use blocks from assistant messages
     // and context tool_result blocks from user messages.
     for msg in msgs.iter_mut() {
         let role = msg
@@ -142,7 +145,7 @@ pub fn strip_anthropic_context_tools(messages: &mut Value) -> CleanupResult {
                 content.retain(|block| {
                     if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
                         if let Some(name) = block.get("name").and_then(|n| n.as_str()) {
-                            if is_context_tool_name(name) {
+                            if is_intercepted_context_tool_name(name) {
                                 return false; // Strip
                             }
                         }
@@ -200,7 +203,8 @@ pub fn strip_openai_context_tools(messages: &mut Value) -> CleanupResult {
         None => return CleanupResult::default(),
     };
 
-    // First pass: collect context tool_call IDs from assistant messages.
+    // First pass: collect interceptor context tool_call IDs from assistant messages.
+    // Only strip bare-prefix tools (proxy-injected). MCP-namespaced tools are preserved.
     let mut context_call_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for msg in msgs.iter() {
@@ -218,7 +222,7 @@ pub fn strip_openai_context_tools(messages: &mut Value) -> CleanupResult {
                 .and_then(|f| f.get("name"))
                 .and_then(|n| n.as_str())
                 .unwrap_or("");
-            if is_context_tool_name(name) {
+            if is_intercepted_context_tool_name(name) {
                 if let Some(id) = tc.get("id").and_then(|i| i.as_str()) {
                     context_call_ids.insert(id.to_string());
                 }
@@ -233,7 +237,7 @@ pub fn strip_openai_context_tools(messages: &mut Value) -> CleanupResult {
     let mut tool_uses_stripped = 0usize;
     let mut tool_results_stripped = 0usize;
 
-    // Second pass: strip context tool calls from assistant messages,
+    // Second pass: strip interceptor context tool calls from assistant messages,
     // and remove tool result messages entirely if they match.
     for msg in msgs.iter_mut() {
         let role = msg
@@ -251,7 +255,7 @@ pub fn strip_openai_context_tools(messages: &mut Value) -> CleanupResult {
                         .and_then(|f| f.get("name"))
                         .and_then(|n| n.as_str())
                         .unwrap_or("");
-                    !is_context_tool_name(name)
+                    !is_intercepted_context_tool_name(name)
                 });
                 tool_uses_stripped += before - tool_calls.len();
 
@@ -318,13 +322,14 @@ pub fn strip_openai_responses_context_tools(input: &mut Value) -> CleanupResult 
         None => return CleanupResult::default(),
     };
 
-    // Collect context function call IDs.
+    // Collect interceptor context function call IDs.
+    // Only strip bare-prefix tools (proxy-injected). MCP-namespaced tools are preserved.
     let mut context_call_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for item in items.iter() {
         if item.get("type").and_then(|t| t.as_str()) == Some("function_call") {
             if let Some(name) = item.get("name").and_then(|n| n.as_str()) {
-                if is_context_tool_name(name) {
+                if is_intercepted_context_tool_name(name) {
                     if let Some(id) = item.get("call_id").and_then(|i| i.as_str()) {
                         context_call_ids.insert(id.to_string());
                     }
@@ -345,7 +350,7 @@ pub fn strip_openai_responses_context_tools(input: &mut Value) -> CleanupResult 
         match item_type {
             "function_call" => {
                 if let Some(name) = item.get("name").and_then(|n| n.as_str()) {
-                    if is_context_tool_name(name) {
+                    if is_intercepted_context_tool_name(name) {
                         tool_uses_stripped += 1;
                         return false;
                     }
@@ -580,6 +585,43 @@ mod tests {
     }
 
     #[test]
+    fn test_strip_anthropic_mcp_namespaced_tools_are_preserved() {
+        let mut messages = serde_json::json!([
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Checking context..."},
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "mcp__aperture__aperture_context_preview",
+                        "input": {}
+                    }
+                ]
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_1", "content": "Context preview..."}
+                ]
+            }
+        ]);
+
+        let result = strip_anthropic_context_tools(&mut messages);
+        assert_eq!(
+            result.tool_uses_stripped, 0,
+            "MCP-namespaced tool names must NOT be stripped (model needs memory)"
+        );
+        assert_eq!(result.tool_results_stripped, 0);
+        // Both messages preserved — model remembers calling the tool
+        let msgs = messages.as_array().unwrap();
+        assert_eq!(msgs.len(), 2);
+        let assistant_content = msgs[0]["content"].as_array().unwrap();
+        assert_eq!(assistant_content.len(), 2);
+        assert_eq!(assistant_content[1]["name"], "mcp__aperture__aperture_context_preview");
+    }
+
+    #[test]
     fn test_strip_anthropic_mixed_real_and_context_tools() {
         let mut messages = serde_json::json!([
             {
@@ -698,6 +740,37 @@ mod tests {
     }
 
     #[test]
+    fn test_strip_openai_mcp_namespaced_tools_are_preserved() {
+        let mut messages = serde_json::json!([
+            {"role": "user", "content": "Help me"},
+            {
+                "role": "assistant",
+                "content": "Let me check the context...",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "mcp__aperture__aperture_context_preview", "arguments": "{}"}
+                    }
+                ]
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": "Preview data..."}
+        ]);
+
+        let result = strip_openai_context_tools(&mut messages);
+        assert_eq!(
+            result.tool_uses_stripped, 0,
+            "MCP-namespaced tool names must NOT be stripped (model needs memory)"
+        );
+        assert_eq!(result.tool_results_stripped, 0);
+        let msgs = messages.as_array().unwrap();
+        // All 3 messages preserved — model remembers calling the tool
+        assert_eq!(msgs.len(), 3);
+        assert!(msgs[1].get("tool_calls").is_some());
+        assert_eq!(msgs[2]["tool_call_id"], "call_1");
+    }
+
+    #[test]
     fn test_strip_openai_mixed_real_and_context_tools() {
         let mut messages = serde_json::json!([
             {
@@ -771,6 +844,31 @@ mod tests {
         let items = input.as_array().unwrap();
         assert_eq!(items.len(), 3); // user message + real function_call + real output
         assert_eq!(items[1]["name"], "read_file");
+    }
+
+    #[test]
+    fn test_strip_openai_responses_mcp_namespaced_tools_are_preserved() {
+        let mut input = serde_json::json!([
+            {"type": "message", "role": "user", "content": "Help me"},
+            {
+                "type": "function_call",
+                "name": "mcp__aperture__aperture_context_preview",
+                "call_id": "fc_1",
+                "arguments": "{}"
+            },
+            {"type": "function_call_output", "call_id": "fc_1", "output": "Preview..."}
+        ]);
+
+        let result = strip_openai_responses_context_tools(&mut input);
+        assert_eq!(
+            result.tool_uses_stripped, 0,
+            "MCP-namespaced tool names must NOT be stripped (model needs memory)"
+        );
+        assert_eq!(result.tool_results_stripped, 0);
+        let items = input.as_array().unwrap();
+        // All 3 items preserved — model remembers calling the tool
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[1]["name"], "mcp__aperture__aperture_context_preview");
     }
 
     // ── Manifest Injection Tests ─────────────────────────────

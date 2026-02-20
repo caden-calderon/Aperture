@@ -197,6 +197,7 @@ fn emit_codex_blocks(
         Some(session_id),
         blocks,
         Vec::new(),
+        0,
     );
 }
 

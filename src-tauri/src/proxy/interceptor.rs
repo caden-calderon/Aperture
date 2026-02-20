@@ -3,10 +3,14 @@
 //! When the model uses `aperture_context_*` tools in its response, this module:
 //! 1. Extracts those calls from the response JSON
 //! 2. Dispatches them internally (no round-trip to the model)
-//! 3. If ONLY context tools were called: re-invokes upstream with results appended
+//! 3. If only context tools were called: re-invokes upstream with results appended
 //! 4. If mixed (real + context tools): strips context calls, returns modified response
 //!
 //! Re-invoke has a depth limit (max 3) and total timeout (60s) for safety.
+
+mod response;
+#[cfg(test)]
+mod tests;
 
 use bytes::Bytes;
 use serde_json::Value;
@@ -14,8 +18,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 
+use self::response::{
+    append_assistant_response, build_circuit_breaker_response, is_context_only_response,
+    strip_context_calls_from_response,
+};
 use crate::engine::ContextEngine;
-use crate::metacog::{self, detect_runtime, is_context_tool_name, RuntimeKind};
+use crate::metacog::{self, detect_runtime, RuntimeKind};
 use crate::proxy::parser::ParsedRequest;
 use crate::proxy::ProxyState;
 
@@ -62,39 +70,66 @@ pub async fn try_context_tool_interception(
         return None;
     }
 
+    if let Some(remaining) = state.runaway_guard.context_circuit_remaining() {
+        return Some(InterceptionResult::ModifiedResponse(
+            build_circuit_breaker_response(runtime_kind, &response_json, remaining.as_secs()),
+        ));
+    }
+
     debug!(
         request_id = %request_id,
         count = context_calls.len(),
         "Extracted context tool calls from response"
     );
 
-    // Dispatch each context tool call
-    let blocks = engine.active_session_blocks();
-    let budget = engine.budget_status();
-    let results: Vec<_> = context_calls
-        .iter()
-        .map(|call| {
-            debug!(
-                request_id = %request_id,
-                tool = %call.name,
-                "Dispatching context tool"
-            );
-            let output = metacog::dispatch_tool(
-                &call.name,
-                &call.arguments,
-                &blocks,
-                &budget,
-                &engine.planner,
-            );
-            metacog::ContextToolResult {
-                tool_use_id: call.id.clone(),
-                content: output.content,
-                is_error: output.is_error,
-            }
-        })
-        .collect();
+    // Dispatch each context tool call.
+    let session_id = engine.resolve_session(
+        &provider_str,
+        &parsed.model,
+        "proxy",
+        parsed.thread_identity.as_deref(),
+    );
+    let blocks = engine.session_blocks(&session_id);
+    let budget = engine.session_budget_status(&session_id);
+    let mut results = Vec::with_capacity(context_calls.len());
+    for call in &context_calls {
+        let tripped = state
+            .runaway_guard
+            .record_context_tool_call()
+            .map(|alert| alert.hard_limit)
+            .unwrap_or(false);
+        if tripped {
+            let wait_secs = state
+                .runaway_guard
+                .context_circuit_remaining()
+                .map(|d| d.as_secs())
+                .unwrap_or(30);
+            return Some(InterceptionResult::ModifiedResponse(
+                build_circuit_breaker_response(runtime_kind, &response_json, wait_secs),
+            ));
+        }
 
-    // Determine if response contains ONLY context tool calls
+        debug!(
+            request_id = %request_id,
+            tool = %call.name,
+            "Dispatching context tool"
+        );
+        let output = metacog::dispatch_tool_for_session(
+            &call.name,
+            &call.arguments,
+            &blocks,
+            &budget,
+            &engine.planner,
+            &session_id,
+        );
+        results.push(metacog::ContextToolResult {
+            tool_use_id: call.id.clone(),
+            content: output.content,
+            is_error: output.is_error,
+        });
+    }
+
+    // Determine if response contains only context tool calls.
     let is_context_only = is_context_only_response(&response_json, runtime_kind);
 
     if is_context_only {
@@ -146,104 +181,6 @@ pub async fn try_context_tool_interception(
 pub enum InterceptionResult {
     /// Response body was modified (context tools stripped or re-invoke result).
     ModifiedResponse(Vec<u8>),
-}
-
-/// Check if a response contains ONLY context tool calls (no text, no real tools).
-fn is_context_only_response(response_json: &Value, runtime_kind: RuntimeKind) -> bool {
-    match runtime_kind {
-        RuntimeKind::CodexProxy => {
-            // Check if the path indicates Responses or ChatCompletions format
-            // by looking at response structure
-            if let Some(output) = response_json.get("output").and_then(|o| o.as_array()) {
-                // Responses API format
-                output.iter().all(|item| {
-                    let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                    match item_type {
-                        "function_call" => {
-                            let name = item.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                            is_context_tool_name(name)
-                        }
-                        _ => false,
-                    }
-                }) && !output.is_empty()
-            } else if let Some(choices) = response_json.get("choices").and_then(|c| c.as_array()) {
-                // ChatCompletions format
-                choices.iter().all(|choice| {
-                    let msg = match choice.get("message") {
-                        Some(m) => m,
-                        None => return false,
-                    };
-                    // No text content
-                    let has_text = msg
-                        .get("content")
-                        .and_then(|c| c.as_str())
-                        .map(|s| !s.is_empty())
-                        .unwrap_or(false);
-                    if has_text {
-                        return false;
-                    }
-                    // All tool calls are context tools
-                    match msg.get("tool_calls").and_then(|tc| tc.as_array()) {
-                        Some(tcs) if !tcs.is_empty() => tcs.iter().all(|tc| {
-                            tc.get("function")
-                                .and_then(|f| f.get("name"))
-                                .and_then(|n| n.as_str())
-                                .map(is_context_tool_name)
-                                .unwrap_or(false)
-                        }),
-                        _ => false,
-                    }
-                })
-            } else {
-                false
-            }
-        }
-        _ => false,
-    }
-}
-
-/// Strip context tool calls from a response, keeping real tool calls and text.
-fn strip_context_calls_from_response(mut response_json: Value, runtime_kind: RuntimeKind) -> Value {
-    if runtime_kind == RuntimeKind::CodexProxy {
-        if let Some(output) = response_json
-            .get_mut("output")
-            .and_then(|o| o.as_array_mut())
-        {
-            // Responses API: remove function_call items that are context tools
-            output.retain(|item| {
-                let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                if item_type == "function_call" {
-                    let name = item.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                    !is_context_tool_name(name)
-                } else {
-                    true
-                }
-            });
-        } else if let Some(choices) = response_json
-            .get_mut("choices")
-            .and_then(|c| c.as_array_mut())
-        {
-            // ChatCompletions: remove context tool_calls from each choice
-            for choice in choices.iter_mut() {
-                if let Some(msg) = choice.get_mut("message") {
-                    if let Some(tcs) = msg.get_mut("tool_calls").and_then(|t| t.as_array_mut()) {
-                        tcs.retain(|tc| {
-                            tc.get("function")
-                                .and_then(|f| f.get("name"))
-                                .and_then(|n| n.as_str())
-                                .map(|name| !is_context_tool_name(name))
-                                .unwrap_or(true)
-                        });
-                        // If no tool_calls remain, remove the key
-                        if tcs.is_empty() {
-                            msg.as_object_mut().map(|obj| obj.remove("tool_calls"));
-                        }
-                    }
-                }
-            }
-        }
-    }
-    response_json
 }
 
 /// Re-invoke the upstream with context tool results appended.
@@ -380,17 +317,25 @@ async fn reinvoke_with_results(
     }
 
     // Dispatch new context tool calls
-    let blocks = engine.active_session_blocks();
-    let budget = engine.budget_status();
+    let provider_str = parsed.provider.to_string();
+    let session_id = engine.resolve_session(
+        &provider_str,
+        &parsed.model,
+        "proxy",
+        parsed.thread_identity.as_deref(),
+    );
+    let blocks = engine.session_blocks(&session_id);
+    let budget = engine.session_budget_status(&session_id);
     let new_results: Vec<_> = new_context_calls
         .iter()
         .map(|call| {
-            let output = metacog::dispatch_tool(
+            let output = metacog::dispatch_tool_for_session(
                 &call.name,
                 &call.arguments,
                 &blocks,
                 &budget,
                 &engine.planner,
+                &session_id,
             );
             metacog::ContextToolResult {
                 tool_use_id: call.id.clone(),
@@ -424,372 +369,5 @@ async fn reinvoke_with_results(
         Some(InterceptionResult::ModifiedResponse(
             serde_json::to_vec(&stripped).unwrap_or_else(|_| response_bytes.to_vec()),
         ))
-    }
-}
-
-/// Append the assistant's response to the request body for re-invocation.
-fn append_assistant_response(
-    request_json: &mut Value,
-    response_json: &Value,
-    runtime_kind: RuntimeKind,
-) {
-    if runtime_kind != RuntimeKind::CodexProxy {
-        return;
-    }
-
-    if let Some(output) = response_json.get("output").and_then(|o| o.as_array()) {
-        // Responses API: append output items to input[]
-        if let Some(input) = request_json.get_mut("input").and_then(|i| i.as_array_mut()) {
-            for item in output {
-                input.push(item.clone());
-            }
-        }
-    } else if let Some(choices) = response_json.get("choices").and_then(|c| c.as_array()) {
-        // ChatCompletions: append assistant message to messages[]
-        if let Some(messages) = request_json
-            .get_mut("messages")
-            .and_then(|m| m.as_array_mut())
-        {
-            if let Some(choice) = choices.first() {
-                if let Some(msg) = choice.get("message") {
-                    messages.push(msg.clone());
-                }
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::proxy::{parser::parse_request, ProxyState};
-    use axum::http::HeaderMap;
-    use serde_json::json;
-
-    // ── is_context_only_response tests ────────────────────────
-
-    #[test]
-    fn test_context_only_responses_api() {
-        let response = json!({
-            "output": [
-                {
-                    "type": "function_call",
-                    "name": "aperture_context_preview",
-                    "call_id": "fc_1",
-                    "arguments": "{}"
-                }
-            ]
-        });
-        assert!(is_context_only_response(&response, RuntimeKind::CodexProxy));
-    }
-
-    #[test]
-    fn test_mixed_responses_api() {
-        let response = json!({
-            "output": [
-                {
-                    "type": "function_call",
-                    "name": "aperture_context_preview",
-                    "call_id": "fc_1",
-                    "arguments": "{}"
-                },
-                {
-                    "type": "function_call",
-                    "name": "read_file",
-                    "call_id": "fc_2",
-                    "arguments": "{\"path\": \"foo.rs\"}"
-                }
-            ]
-        });
-        assert!(!is_context_only_response(
-            &response,
-            RuntimeKind::CodexProxy
-        ));
-    }
-
-    #[test]
-    fn test_context_only_chat_completions() {
-        let response = json!({
-            "choices": [{
-                "message": {
-                    "role": "assistant",
-                    "content": null,
-                    "tool_calls": [
-                        {
-                            "id": "call_1",
-                            "type": "function",
-                            "function": {
-                                "name": "aperture_context_preview",
-                                "arguments": "{}"
-                            }
-                        }
-                    ]
-                }
-            }]
-        });
-        assert!(is_context_only_response(&response, RuntimeKind::CodexProxy));
-    }
-
-    #[test]
-    fn test_mixed_chat_completions_with_text() {
-        let response = json!({
-            "choices": [{
-                "message": {
-                    "role": "assistant",
-                    "content": "Let me check...",
-                    "tool_calls": [
-                        {
-                            "id": "call_1",
-                            "type": "function",
-                            "function": {
-                                "name": "aperture_context_preview",
-                                "arguments": "{}"
-                            }
-                        }
-                    ]
-                }
-            }]
-        });
-        assert!(!is_context_only_response(
-            &response,
-            RuntimeKind::CodexProxy
-        ));
-    }
-
-    #[test]
-    fn test_mixed_chat_completions_real_and_context_tools() {
-        let response = json!({
-            "choices": [{
-                "message": {
-                    "role": "assistant",
-                    "content": null,
-                    "tool_calls": [
-                        {
-                            "id": "call_1",
-                            "type": "function",
-                            "function": {
-                                "name": "aperture_context_preview",
-                                "arguments": "{}"
-                            }
-                        },
-                        {
-                            "id": "call_2",
-                            "type": "function",
-                            "function": {
-                                "name": "read_file",
-                                "arguments": "{}"
-                            }
-                        }
-                    ]
-                }
-            }]
-        });
-        assert!(!is_context_only_response(
-            &response,
-            RuntimeKind::CodexProxy
-        ));
-    }
-
-    #[test]
-    fn test_no_tool_calls_not_context_only() {
-        let response = json!({
-            "choices": [{
-                "message": {
-                    "role": "assistant",
-                    "content": "Hello!"
-                }
-            }]
-        });
-        assert!(!is_context_only_response(
-            &response,
-            RuntimeKind::CodexProxy
-        ));
-    }
-
-    #[test]
-    fn test_passive_runtime_never_context_only() {
-        let response = json!({
-            "choices": [{
-                "message": {
-                    "content": null,
-                    "tool_calls": [{"id": "1", "type": "function", "function": {"name": "aperture_context_preview", "arguments": "{}"}}]
-                }
-            }]
-        });
-        assert!(!is_context_only_response(&response, RuntimeKind::Passive));
-    }
-
-    // ── strip_context_calls_from_response tests ──────────────
-
-    #[test]
-    fn test_strip_responses_api() {
-        let response = json!({
-            "output": [
-                {"type": "function_call", "name": "aperture_context_preview", "call_id": "fc_1", "arguments": "{}"},
-                {"type": "function_call", "name": "read_file", "call_id": "fc_2", "arguments": "{}"},
-                {"type": "message", "content": [{"type": "output_text", "text": "Done"}]}
-            ]
-        });
-        let stripped = strip_context_calls_from_response(response, RuntimeKind::CodexProxy);
-        let output = stripped["output"].as_array().unwrap();
-        assert_eq!(output.len(), 2);
-        assert_eq!(output[0]["name"], "read_file");
-        assert_eq!(output[1]["type"], "message");
-    }
-
-    #[test]
-    fn test_strip_chat_completions() {
-        let response = json!({
-            "choices": [{
-                "message": {
-                    "role": "assistant",
-                    "content": null,
-                    "tool_calls": [
-                        {"id": "call_1", "type": "function", "function": {"name": "aperture_context_preview", "arguments": "{}"}},
-                        {"id": "call_2", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}
-                    ]
-                }
-            }]
-        });
-        let stripped = strip_context_calls_from_response(response, RuntimeKind::CodexProxy);
-        let tcs = stripped["choices"][0]["message"]["tool_calls"]
-            .as_array()
-            .unwrap();
-        assert_eq!(tcs.len(), 1);
-        assert_eq!(tcs[0]["function"]["name"], "read_file");
-    }
-
-    #[test]
-    fn test_strip_all_context_calls_removes_tool_calls_key() {
-        let response = json!({
-            "choices": [{
-                "message": {
-                    "role": "assistant",
-                    "content": "text",
-                    "tool_calls": [
-                        {"id": "call_1", "type": "function", "function": {"name": "aperture_context_preview", "arguments": "{}"}}
-                    ]
-                }
-            }]
-        });
-        let stripped = strip_context_calls_from_response(response, RuntimeKind::CodexProxy);
-        assert!(stripped["choices"][0]["message"]
-            .get("tool_calls")
-            .is_none());
-    }
-
-    // ── append_assistant_response tests ──────────────────────
-
-    #[test]
-    fn test_append_assistant_response_responses_api() {
-        let mut request = json!({
-            "input": [
-                {"type": "message", "role": "user", "content": "Hello"}
-            ]
-        });
-        let response = json!({
-            "output": [
-                {"type": "function_call", "name": "aperture_context_preview", "call_id": "fc_1", "arguments": "{}"}
-            ]
-        });
-        append_assistant_response(&mut request, &response, RuntimeKind::CodexProxy);
-        let input = request["input"].as_array().unwrap();
-        assert_eq!(input.len(), 2);
-        assert_eq!(input[1]["type"], "function_call");
-    }
-
-    #[test]
-    fn test_append_assistant_response_chat_completions() {
-        let mut request = json!({
-            "messages": [
-                {"role": "user", "content": "Hello"}
-            ]
-        });
-        let response = json!({
-            "choices": [{
-                "message": {
-                    "role": "assistant",
-                    "content": null,
-                    "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "aperture_context_preview", "arguments": "{}"}}]
-                }
-            }]
-        });
-        append_assistant_response(&mut request, &response, RuntimeKind::CodexProxy);
-        let messages = request["messages"].as_array().unwrap();
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[1]["role"], "assistant");
-    }
-
-    #[tokio::test]
-    async fn test_reinvoke_depth_limit_fail_open_returns_none() {
-        let state = Arc::new(ProxyState::new().expect("proxy state"));
-        let engine = ContextEngine::new_in_memory(None);
-        let request_body = serde_json::to_vec(&json!({
-            "model": "gpt-4.1",
-            "input": [{ "type": "message", "role": "user", "content": "hi" }]
-        }))
-        .expect("serialize request");
-        let parsed = parse_request("/v1/responses", &request_body).expect("parsed request");
-        let headers = HeaderMap::new();
-        let results: Vec<metacog::ContextToolResult> = vec![];
-
-        let result = reinvoke_with_results(
-            &state,
-            "req_depth",
-            "/v1/responses",
-            &parsed,
-            &engine,
-            &request_body,
-            &json!({}),
-            &results,
-            "http://127.0.0.1:9/v1/responses",
-            &headers,
-            RuntimeKind::CodexProxy,
-            Instant::now(),
-            MAX_REINVOKE_DEPTH,
-        )
-        .await;
-
-        assert!(
-            result.is_none(),
-            "Depth-limit path should fail-open to caller fallback"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_reinvoke_timeout_fail_open_returns_none() {
-        let state = Arc::new(ProxyState::new().expect("proxy state"));
-        let engine = ContextEngine::new_in_memory(None);
-        let request_body = serde_json::to_vec(&json!({
-            "model": "gpt-4.1",
-            "input": [{ "type": "message", "role": "user", "content": "hi" }]
-        }))
-        .expect("serialize request");
-        let parsed = parse_request("/v1/responses", &request_body).expect("parsed request");
-        let headers = HeaderMap::new();
-        let results: Vec<metacog::ContextToolResult> = vec![];
-        let timed_out_start = Instant::now() - REINVOKE_TIMEOUT - Duration::from_secs(1);
-
-        let result = reinvoke_with_results(
-            &state,
-            "req_timeout",
-            "/v1/responses",
-            &parsed,
-            &engine,
-            &request_body,
-            &json!({}),
-            &results,
-            "http://127.0.0.1:9/v1/responses",
-            &headers,
-            RuntimeKind::CodexProxy,
-            timed_out_start,
-            0,
-        )
-        .await;
-
-        assert!(
-            result.is_none(),
-            "Timeout path should fail-open to caller fallback"
-        );
     }
 }

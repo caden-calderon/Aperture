@@ -18,10 +18,14 @@ pub mod tools;
 
 // Re-export key types for convenience
 pub use runtime::{
-    context_tool_definitions, detect_runtime, is_context_tool_name, CleanupResult, ContextToolCall,
-    ContextToolDef, ContextToolResult, ContextToolRuntime, RuntimeKind, CONTEXT_TOOL_PREFIX,
+    context_tool_definitions, context_tools_mode, context_tools_passive_only, detect_runtime,
+    is_context_tool_name, CleanupResult, ContextToolCall, ContextToolDef, ContextToolResult,
+    ContextToolRuntime, RuntimeKind, CONTEXT_TOOL_PREFIX, MCP_CONTEXT_TOOL_PREFIX,
 };
-pub use tools::{dispatch_tool, ToolOutput};
+pub use tools::{
+    dispatch_tool, dispatch_tool_for_session, dispatch_tool_with_limits,
+    dispatch_tool_with_limits_for_session, ToolOutput, ToolOutputLimits,
+};
 
 pub use claude_mcp::ClaudeMcpRuntime;
 pub use codex_proxy::{CodexProxyRuntime, OpenAiFormat};

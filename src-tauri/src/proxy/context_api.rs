@@ -19,10 +19,15 @@ use axum::{
 };
 use serde_json::{json, Value};
 use std::sync::Arc;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use super::ProxyState;
-use crate::metacog::{dispatch_tool, ToolOutput};
+use crate::engine::ContextEngine;
+use crate::metacog::{
+    context_tools_passive_only, dispatch_tool_with_limits_for_session, ToolOutput, ToolOutputLimits,
+};
+
+const CONTEXT_API_BODY_LIMIT_BYTES: usize = 1024 * 64;
 
 /// Route an `/_aperture/*` request to the appropriate handler.
 ///
@@ -33,25 +38,39 @@ pub async fn handle_aperture_route(
     path: &str,
     req: Request<Body>,
 ) -> Option<Response> {
-    if !path.starts_with("/_aperture/") && path != "/_aperture" {
+    if !is_aperture_path(path) {
         return None;
     }
 
     let sub_path = path.strip_prefix("/_aperture").unwrap_or("");
 
-    Some(match sub_path {
-        "/health" => health_check().into_response(),
-        "/context/preview" => dispatch_context_tool(state, "aperture_context_preview", req).await,
-        "/context/read" => dispatch_context_tool(state, "aperture_context_read", req).await,
-        "/context/search" => dispatch_context_tool(state, "aperture_context_search", req).await,
-        "/context/plan" => dispatch_context_tool(state, "aperture_context_plan", req).await,
-        "/context/status" => dispatch_context_tool(state, "aperture_context_status", req).await,
-        _ => (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "unknown aperture route"})),
-        )
-            .into_response(),
-    })
+    if sub_path == "/health" {
+        return Some(health_check().into_response());
+    }
+
+    if let Some(tool_name) = context_tool_name(sub_path) {
+        return Some(dispatch_context_tool(state, tool_name, req).await);
+    }
+
+    Some(json_error_response(
+        StatusCode::NOT_FOUND,
+        "unknown aperture route",
+    ))
+}
+
+fn is_aperture_path(path: &str) -> bool {
+    path.starts_with("/_aperture/") || path == "/_aperture"
+}
+
+fn context_tool_name(sub_path: &str) -> Option<&'static str> {
+    match sub_path {
+        "/context/preview" => Some("aperture_context_preview"),
+        "/context/read" => Some("aperture_context_read"),
+        "/context/search" => Some("aperture_context_search"),
+        "/context/plan" => Some("aperture_context_plan"),
+        "/context/status" => Some("aperture_context_status"),
+        _ => None,
+    }
 }
 
 /// Health check — confirms the proxy is running and engine is available.
@@ -69,46 +88,91 @@ async fn dispatch_context_tool(
     tool_name: &str,
     req: Request<Body>,
 ) -> Response {
-    let engine = match &state.engine {
-        Some(e) => e,
+    if context_tools_passive_only() {
+        return context_tools_disabled_response(
+            "Aperture context tools are disabled (passive-only mode). Set APERTURE_CONTEXT_TOOLS_MODE=enabled to re-enable.",
+        );
+    }
+
+    let engine = match state.engine.as_ref() {
+        Some(engine) => engine,
         None => {
-            return (
+            return json_error_response(
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({"error": "context engine not available"})),
+                "context engine not available",
             )
-                .into_response();
         }
     };
 
-    // Parse request body as JSON arguments (empty object if no body)
-    let body_bytes = match axum::body::to_bytes(req.into_body(), 1024 * 64).await {
-        Ok(b) => b,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": format!("invalid request body: {e}")})),
-            )
-                .into_response();
-        }
+    let mut arguments = match parse_tool_arguments(req).await {
+        Ok(arguments) => arguments,
+        Err(response) => return response,
     };
 
-    let arguments: Value = if body_bytes.is_empty() {
-        json!({})
-    } else {
-        match serde_json::from_slice(&body_bytes) {
-            Ok(v) => v,
-            Err(e) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({"error": format!("invalid JSON: {e}")})),
-                )
-                    .into_response();
-            }
-        }
-    };
+    let session_id = resolve_tool_session_id(engine, &mut arguments);
+    let blocks = engine.session_blocks(&session_id);
+    let budget = engine.session_budget_status(&session_id);
 
-    let blocks = engine.active_session_blocks();
-    let budget = engine.budget_status();
+    if let Some(remaining) = state.runaway_guard.context_circuit_remaining() {
+        let secs = remaining.as_secs().max(1);
+        return context_tool_error_response(&format!(
+            "Aperture context tools are temporarily blocked by circuit breaker due to runaway call rate. Retry in ~{}s.",
+            secs
+        ));
+    }
+
+    let runaway_alert = state.runaway_guard.record_context_tool_call();
+    if let Some(alert) = &runaway_alert {
+        warn!(
+            tool = tool_name,
+            channel = alert.channel,
+            count = alert.count,
+            threshold = alert.threshold,
+            window_secs = alert.window_secs,
+            hard_limit = alert.hard_limit,
+            "Runaway guardrail warning: high context-tool call rate"
+        );
+        if let Some(ref dispatcher) = state.dispatcher {
+            dispatcher.proxy_error(
+                None,
+                &format!(
+                    "Guardrail warning: high context-tool call rate ({} calls in {}s).",
+                    alert.count, alert.window_secs
+                ),
+            );
+        }
+    }
+
+    if runaway_alert
+        .as_ref()
+        .map(|alert| alert.hard_limit)
+        .unwrap_or(false)
+    {
+        let pct = (budget.utilization * 100.0).round() as u32;
+        return context_tool_error_response(&format!(
+            "Aperture circuit breaker triggered after sustained context-tool burst. Context tools are now blocked briefly to stop runaway token burn. Current context: {} blocks, {}% budget.",
+            blocks.len(),
+            pct
+        ));
+    }
+
+    // Diagnostic tracing (R9-1): log session ID on plan commit to detect H1 mismatch.
+    if tool_name == "aperture_context_plan" {
+        let plan_op = arguments
+            .get("control")
+            .and_then(|c| c.get("op"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("(implicit)");
+        if plan_op == "commit" || plan_op == "stage" {
+            warn!(
+                tool = tool_name,
+                op = plan_op,
+                session_id = %session_id,
+                blocks = blocks.len(),
+                "R9-DIAG context_api: plan operation with resolved session"
+            );
+        }
+    }
 
     debug!(
         tool = tool_name,
@@ -116,149 +180,89 @@ async fn dispatch_context_tool(
         "Dispatching context tool via HTTP API"
     );
 
-    let output: ToolOutput =
-        dispatch_tool(tool_name, &arguments, &blocks, &budget, &engine.planner);
+    let output: ToolOutput = dispatch_tool_with_limits_for_session(
+        tool_name,
+        &arguments,
+        &blocks,
+        &budget,
+        &engine.planner,
+        ToolOutputLimits::default(),
+        &session_id,
+    );
 
     // Tool errors are application-level (returned in JSON body), not HTTP errors.
     (
         StatusCode::OK,
         Json(json!({
             "content": output.content,
-            "is_error": output.is_error
+            "is_error": output.is_error,
+            "session_id": session_id
         })),
     )
         .into_response()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::engine::ContextEngine;
-    use crate::proxy::ProxyState;
+async fn parse_tool_arguments(req: Request<Body>) -> Result<Value, Response> {
+    let body_bytes = axum::body::to_bytes(req.into_body(), CONTEXT_API_BODY_LIMIT_BYTES)
+        .await
+        .map_err(|error| {
+            json_error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("invalid request body: {error}"),
+            )
+        })?;
 
-    fn make_state_with_engine() -> Arc<ProxyState> {
-        let engine = Arc::new(ContextEngine::new_in_memory(None));
-        let mut state = ProxyState::new().unwrap();
-        state.engine = Some(engine);
-        Arc::new(state)
+    if body_bytes.is_empty() {
+        return Ok(json!({}));
     }
 
-    fn make_state_without_engine() -> Arc<ProxyState> {
-        Arc::new(ProxyState::new().unwrap())
-    }
-
-    fn make_request(body: &str) -> Request<Body> {
-        Request::builder()
-            .method("POST")
-            .uri("/_aperture/context/preview")
-            .header("content-type", "application/json")
-            .body(Body::from(body.to_string()))
-            .unwrap()
-    }
-
-    fn make_empty_request() -> Request<Body> {
-        Request::builder()
-            .method("POST")
-            .uri("/_aperture/context/preview")
-            .body(Body::empty())
-            .unwrap()
-    }
-
-    fn make_get_request(path: &str) -> Request<Body> {
-        Request::builder()
-            .method("GET")
-            .uri(path)
-            .body(Body::empty())
-            .unwrap()
-    }
-
-    #[tokio::test]
-    async fn test_health_check() {
-        let state = make_state_with_engine();
-        let req = make_get_request("/_aperture/health");
-        let resp = handle_aperture_route(&state, "/_aperture/health", req)
-            .await
-            .expect("should match route");
-        assert_eq!(resp.status(), StatusCode::OK);
-
-        let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
-        let json: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["status"], "ok");
-        assert_eq!(json["service"], "aperture");
-    }
-
-    #[tokio::test]
-    async fn test_non_aperture_path_returns_none() {
-        let state = make_state_with_engine();
-        let req = make_get_request("/v1/messages");
-        let result = handle_aperture_route(&state, "/v1/messages", req).await;
-        assert!(result.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_unknown_aperture_route_returns_404() {
-        let state = make_state_with_engine();
-        let req = make_get_request("/_aperture/nonexistent");
-        let resp = handle_aperture_route(&state, "/_aperture/nonexistent", req)
-            .await
-            .expect("should match route");
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn test_context_preview_empty_engine() {
-        let state = make_state_with_engine();
-        let req = make_empty_request();
-        let resp = dispatch_context_tool(&state, "aperture_context_preview", req).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-
-        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
-        let json: Value = serde_json::from_slice(&body).unwrap();
-        assert!(!json["is_error"].as_bool().unwrap());
-        assert!(json["content"].as_str().unwrap().contains("0 blocks"));
-    }
-
-    #[tokio::test]
-    async fn test_engine_unavailable_returns_503() {
-        let state = make_state_without_engine();
-        let req = make_empty_request();
-        let resp = dispatch_context_tool(&state, "aperture_context_preview", req).await;
-        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
-    }
-
-    #[tokio::test]
-    async fn test_context_read_requires_block_id() {
-        let state = make_state_with_engine();
-        let req = make_request(r#"{"block_id": ""}"#);
-        let resp = dispatch_context_tool(&state, "aperture_context_read", req).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-
-        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
-        let json: Value = serde_json::from_slice(&body).unwrap();
-        assert!(json["is_error"].as_bool().unwrap());
-        assert!(json["content"].as_str().unwrap().contains("required"));
-    }
-
-    #[tokio::test]
-    async fn test_context_search_empty_query() {
-        let state = make_state_with_engine();
-        let req = make_request(r#"{"query": ""}"#);
-        let resp = dispatch_context_tool(&state, "aperture_context_search", req).await;
-
-        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
-        let json: Value = serde_json::from_slice(&body).unwrap();
-        assert!(json["is_error"].as_bool().unwrap());
-    }
-
-    #[tokio::test]
-    async fn test_invalid_json_body() {
-        let state = make_state_with_engine();
-        let req = Request::builder()
-            .method("POST")
-            .uri("/_aperture/context/preview")
-            .body(Body::from("not json"))
-            .unwrap();
-        let resp = dispatch_context_tool(&state, "aperture_context_preview", req).await;
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    }
+    serde_json::from_slice(&body_bytes).map_err(|error| {
+        json_error_response(StatusCode::BAD_REQUEST, &format!("invalid JSON: {error}"))
+    })
 }
+
+fn resolve_tool_session_id(engine: &ContextEngine, arguments: &mut Value) -> String {
+    let requested = arguments
+        .as_object()
+        .and_then(|obj| obj.get("_aperture_session_id"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+
+    if let Some(obj) = arguments.as_object_mut() {
+        obj.remove("_aperture_session_id");
+    }
+
+    if let Some(requested_id) = requested {
+        if engine.has_session(&requested_id) {
+            return requested_id;
+        }
+    }
+
+    engine
+        .active_session_id()
+        .unwrap_or_else(|| "__legacy__".to_string())
+}
+
+fn json_error_response(status: StatusCode, message: &str) -> Response {
+    (status, Json(json!({"error": message}))).into_response()
+}
+
+fn context_tool_error_response(message: &str) -> Response {
+    (
+        StatusCode::OK,
+        Json(json!({
+            "content": message,
+            "is_error": true
+        })),
+    )
+        .into_response()
+}
+
+fn context_tools_disabled_response(message: &str) -> Response {
+    context_tool_error_response(message)
+}
+
+#[cfg(test)]
+mod tests;

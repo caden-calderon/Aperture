@@ -9,210 +9,114 @@
 
 | Field | Value |
 |-------|-------|
-| **Phase** | 4 — Compression Readiness (Checkpoint A complete) |
-| **Status** | Phase 3 complete/remediated; Phase 4 Checkpoint A complete; manual verification in progress |
-| **Last Updated** | 2026-02-14 |
-| **Blocking Issues** | MCP smoke test currently hitting Anthropic orphan `tool_result` validation error |
-| **Next Step** | Triage/fix Phase 3 tool lifecycle validation issue, then continue Phase 4 Checkpoint B. |
+| **Phase** | 4 — Token Economics Parity |
+| **Status** | **Manual test Round 10 PASSED. 2 successful cleans. All 3 fixes implemented. Log analysis pending.** |
+| **Last Updated** | 2026-02-20 |
+| **Tests** | 696 passing (643 Rust + 53 frontend), clippy clean |
+| **Next Step** | Analyze Round 10 JSONL logs — verify diagnostic tracing, confirm H1 vs H2, assess remaining bugs |
 
 ---
 
-## Active Handoff (2026-02-13)
+## Manual Test Round 10 Results (2026-02-20)
 
-### Phase 4 Compression Readiness — Checkpoint A (NEW)
+**Best run yet. 2 successful context cleans with plan layering.**
 
-**Artifacts:**
-- `dev/active/phase-4-compression-readiness/context.md`
-- `dev/active/phase-4-compression-readiness/plan.md`
-- `dev/active/phase-4-compression-readiness/tasks.md`
+### MCP Tool Coverage — All Confirmed Working
 
-**Implemented (Checkpoint A):**
-- Added `engine::compression` foundations:
-  - `CompressionSettings` + backend/model default routing policy.
-  - Provider contract with fail-open helper semantics.
-  - Async queue contract (`CompressionQueue`, job lifecycle types).
-- Wired compression settings into engine state + Tauri IPC:
-  - `engine_get_compression_settings`
-  - `engine_update_compression_settings`
-- Added frontend settings/store support for sidekick compression config:
-  - Backend select, model override, timeout, max tokens.
-- Preserved fail-open proxy behavior and existing planner/rewrite boundaries (no autonomous sidekick execution yet).
+| Tool | Status |
+|------|--------|
+| `aperture_context_preview` | ✓ returns zone-grouped block list with archival suggestions |
+| `aperture_context_status` | ✓ returns full manifest with token counts per block |
+| `aperture_context_search` | ✓ returns relevance-ranked matches with snippets + file paths |
+| `aperture_context_read` | ✓ returns full block content; output guardrail truncates at ~5.8k chars |
+| `aperture_context_plan` | ✓ stage → commit flow works; all ops confirmed below |
 
-**Validation (Checkpoint A):**
-- `cargo fmt --check` ✅
-- `cargo clippy -- -D warnings` ✅
-- `cargo test` ✅ **504 total** (465 lib + 6 bin + 33 integration)
-- `npx vitest run` ✅ **50/50**
-- `npm run check` ✅ 0 errors, 0 warnings
+### Plan Operations — All Confirmed Working
 
-**Next checkpoint:**
-- Implement real provider adapters + queue worker execution (Checkpoint B), then integrate autonomous sidekick compression path.
+| Op | Result |
+|----|--------|
+| `archive` | Strips blocks from payload, adds to `persistent_archived_ids` |
+| `compress` | Replaces block content with model-authored summary (-3.7k for 3.8k block) |
+| `expand` | Restores full content from compressed block |
+| `recall` | Brings archived block back into active context |
+| `pin` | Marks block to prevent auto-archival |
+| `shift_to` | Moves block to target zone (tested: Middle → Primacy) |
 
-**Current verification issue (2026-02-14):**
-- MCP smoke test failed with Anthropic validation error:
-  - `unexpected tool_use_id found in tool_result blocks ... must have a corresponding tool_use block in the previous message`
-- Treat as Phase 3 lifecycle triage before deeper Phase 4 testing.
+### Confirmed Behaviors
 
-### Phase 3 Staff Review + Remediation Plan (NEW)
+- **One-turn lag**: Plan committed in turn N fires on turn N+1's outgoing request. Expected.
+- **Persistent archival stacking**: Multiple archive rounds accumulate correctly. Round 1 (8 blocks) + Round 2 (8 blocks) + Round 3 (5 blocks) = 21 blocks persistently stripped each turn.
+- **Plans layered with user turns between them work correctly** — second and third plans fire as expected when each commit has at least one user turn before the next commit.
 
-**Review artifacts:**
-- `dev/active/metacog-dynamic-shifting/staff-review-2026-02-13.md` — full staff-level findings, severity-ranked
-- `dev/active/metacog-dynamic-shifting/plan.md` — remediation waves and exit criteria
-- `dev/active/metacog-dynamic-shifting/tasks.md` — implementation checklist
-- `dev/active/metacog-dynamic-shifting/context.md` — continuity context
-- `dev/active/metacog-dynamic-shifting/restart-prompt.md` — post-clear resume prompt
+### Remaining Bugs (Low Severity)
 
-**Priority findings to fix first:**
-1. Budget ceiling setting does not affect heuristic thresholds at runtime
-2. Re-invoke loop ordering can strip required context-tool lifecycle state
-3. Archive/compress/update semantics are not durably represented as between-turn engine state
-4. Intercepted responses currently capture original upstream body instead of modified body
+1. **Net: +0 in breadcrumb** — delta always shows 0 for persistent re-archival. Engine marks blocks archived before breadcrumb delta is calculated. Budget % IS correct. Only the delta display is wrong.
+2. **Budget % mismatch vs `/context`** — breadcrumb computes from engine's message payload only (~22% for 44k messages). `/context` includes overhead (system prompt 8.6k + system tools 17.6k + MCP tools 3.6k + memory 5.6k = ~35k). At 200k limit, this ~35k overhead is a constant ~17.5% gap.
+3. **Claude Code crash on file edit through proxy** — When CC edits files while running through Aperture, it crashes after the edit lands. Edits persist but the session dies — user must `cd` back and `/resume`. Model doesn't know the edit succeeded (interrupted before response logged). Seen in R9 and R10. Likely related to R9-2 (file-watcher crash). May be CC bug triggered by proxy latency/rewriting, not Aperture logic.
 
-**Immediate plan:**
-- Wave 1 complete (2026-02-13):
-  - Fixed planner runtime budget ceiling plumbing into heuristics.
-  - Fixed re-invoke lifecycle ordering to preserve context tool conversation state.
-  - Fixed intercepted response capture body source to use effective returned body.
-  - Added test coverage for context-only re-invoke, mixed calls, depth-limit fail-open, timeout fail-open, and budget ceiling override behavior.
-- Wave 2 complete (2026-02-13):
-  - Persisted archive/compress/update/expand semantics into engine-side durable mutation application.
-  - Reordered capture/rewrite/ingest flow so capture occurs from effective rewritten payload semantics.
-  - Wired planner signals from real proxy traffic (current files, previous files/task-boundary, file mutations).
-  - Added round-trip persistence tests across multiple turns and capture-order regression coverage.
-- Wave 3 complete (2026-02-13):
-  - MCP `tools/list` schema is now generated from shared runtime tool definitions (no duplicated MCP-only schema surface).
-  - Frontend threshold math aligned to planner policy (50/80/100 of configured ceiling).
-  - `budgetCeiling` is now passed to `TokenBudgetBar` usage site.
-  - Tool lifecycle integration tests now enforce rewrite/tool-array expectations (no weak optional assertions).
-  - Existing Svelte warnings addressed in touched components (`ContextBlock`, `SettingsPanel`).
-  - Validation: `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`, `npx vitest run` (47/47), `npm run check` (0 warnings).
-- Phase 4 kickoff completed: Checkpoint A foundations implemented and validated.
+### Key Observation: Tool Overhead Cost
+
+Each full plan cycle (preview + stage + commit) adds ~2-3k tokens in tool use/result blocks. Multiple operations in one session can add 12-16k tokens — partially offsetting archival savings.
+
+**Practical guideline**: Target blocks >3k tokens for manual archival. Archiving a 500-token block costs more in tool overhead than it saves.
 
 ---
 
-### Phase 3 Checkpoint G (COMPLETE)
+## Implemented Fixes (2026-02-20)
 
-**What was built:**
+All 3 fixes implemented, tested (696 total), clippy clean.
 
-**G2/G6 — Engine HTTP API** (`src-tauri/src/proxy/context_api.rs`):
-- `handle_aperture_route()` — Routes `/_aperture/*` requests to internal handlers
-- 6 endpoints: `/context/{preview,read,search,plan,status}` + `/health`
-- Each handler extracts engine blocks + budget, calls `dispatch_tool()`, returns JSON
-- Health endpoint returns service status + version
-- Error handling: 503 if engine unavailable, 400 for invalid JSON, 404 for unknown routes
-- 8 tests covering all endpoint types, error cases, and routing
+| # | Fix | Severity | Status |
+|---|-----|----------|--------|
+| 1 | **Option B**: `add_persistent_archives_for_session()` + call at commit time | P0 | **IMPLEMENTED** |
+| 2 | **Diagnostic tracing**: 4 `warn!()` calls (rewriter cold-start, rewriter consume, context_api, planner) | P0 | **IMPLEMENTED** |
+| 3 | **MCP retry**: `call_proxy()` retries once on connection failure (500ms delay) | P2 | **IMPLEMENTED** |
 
-**Router Integration** (`src-tauri/src/proxy/handler.rs`, `mod.rs`):
-- `/_aperture/` path check added before upstream routing in `proxy_handler()`
-- `pub mod context_api` registered in `proxy/mod.rs`
-- Internal routes never forwarded upstream
+### Code Changes
 
-**G3 — MCP Server Binary** (`src-tauri/src/bin/aperture_mcp.rs`):
-- Standalone `aperture-mcp` binary (stdio JSON-RPC 2.0, newline-delimited)
-- MCP protocol: `initialize`, `notifications/initialized`, `tools/list`, `tools/call`, `ping`
-- 5 context tools with MCP-format `inputSchema` definitions
-- HTTP calls to proxy's `/_aperture/context/*` endpoints via `reqwest::blocking`
-- Reads `APERTURE_PORT` env var (default 5400)
-- Tool errors returned as MCP `isError: true`, not HTTP errors (fail-open)
-- `[[bin]]` entry in Cargo.toml, `reqwest` blocking feature added
-- 5 tests for tool path mapping, tool definitions, and schema validation
+- `engine/planner/mod.rs:237-262` — New `add_persistent_archives_for_session()` method
+- `metacog/tools/plan.rs:248` — Call `add_persistent_archives_for_session()` after commit
+- `proxy/rewriter.rs:69-74` — R9-DIAG: cold-start with pending plan (H2 indicator)
+- `proxy/rewriter.rs:116-121` — R9-DIAG: pending plan consumed (session + mutation count)
+- `proxy/context_api.rs:159-171` — R9-DIAG: plan stage/commit session resolution
+- `engine/planner/mod.rs:520-525` — R9-DIAG: plan applied in planner (session + persistent count)
+- `mcp/server.rs:64-89` — Retry loop (2 attempts, 500ms delay, stderr logging)
 
-**G5 — ClaudeMcpRuntime Verification:**
-- Existing `cleanup_history()` → `strip_anthropic_context_tools()` already handles MCP tool_use/tool_result stripping correctly
-- No code changes needed — the Anthropic-format cleanup covers MCP messages natively
+### New Tests (3)
 
-**Validation:**
-- `cargo clippy -- -D warnings` ✅ clean
-- `cargo fmt --check` ✅ clean
-- `cargo test` ✅ **473 total** (440 lib + 5 bin + 2 session + 17 proxy + 9 tool lifecycle)
-- `vitest` ✅ **44 frontend tests**
-- `svelte-check` ✅ 0 errors, 2 warnings
-- `cargo build --bin aperture-mcp` ✅ binary builds
-
-**Test counts by checkpoint:**
-| Checkpoint | New Rust Tests | New Frontend Tests | Cumulative Rust | Cumulative Frontend |
-|-----------|---------------|-------------------|-----------------|---------------------|
-| A (Planner + Tools) | 69 | 0 | 260 | 37 |
-| B (Adapters + Cleanup) | 59 | 0 | 338 | 37 |
-| C (Heuristics + File Tracking) | 53 | 0 | 371 | 37 |
-| D (Rewriter + UI) | 50 | 0 | 421 | 37 |
-| E (Tool Lifecycle) | 30 | 0 | 451 | 37 |
-| F (Integration + Tests) | 9 | 7 | 460 | 44 |
-| **G (MCP Server)** | **13** | **0** | **473** | **44** |
+- `test_add_persistent_archives_at_commit_time` — verifies persistent IDs survive without plan_for_session consumption
+- `test_add_persistent_archives_recall_removes_from_persistent_set` — recall correctly removes from persistent set
+- `test_add_persistent_archives_idempotent` — duplicate inserts produce exactly one mutation
 
 ---
 
-## MCP Configuration for Claude Code
+## Next Session: Log Analysis
 
-To use the MCP server with Claude Code, add to project `.mcp.json`:
+1. **Read this file** (already reading)
+2. **Find Round 10 JSONL log** in `~/.claude/projects/-home-caden-projects-Aperture/`
+3. **Analyze diagnostic traces**: grep for `R9-DIAG` in proxy stderr/logs
+4. **Confirm H1 vs H2** — compare session IDs across trace points
+5. **Assess breadcrumb delta bug** — determine fix approach
+6. **Assess budget % gap** — determine if overhead should be included in engine budget
 
-```json
-{
-  "mcpServers": {
-    "aperture": {
-      "command": "aperture-mcp",
-      "env": {
-        "APERTURE_PORT": "5400"
-      }
-    }
-  }
-}
-```
+### If H1 confirmed (session mismatch)
+Consider session resolution hardening — single canonical session path.
 
-Or auto-configure via `aperture claude`.
+### If H2 confirmed (streaming race)
+Consider atomic ingest or mutex around block store during ingest.
 
-**Data flow:**
-```
-Claude Code ──(MCP stdio)──→ aperture-mcp binary
-  aperture-mcp ──(HTTP)──→ http://localhost:5400/_aperture/context/preview
-    proxy handler ──→ dispatch_tool("aperture_context_preview", ...) ──→ engine
-  aperture-mcp ←── JSON result
-Claude Code ←── MCP tool_result
-```
+### After root cause confirmed
+Downgrade `R9-DIAG` tracing from `warn!()` to `debug!()`.
 
 ---
 
-## Key Reads for Next Session
+## Key Architecture (Post-Refactor)
 
-1. `dev/active/phase-4-compression-readiness/context.md`
-2. `dev/active/phase-4-compression-readiness/plan.md`
-3. `dev/active/phase-4-compression-readiness/tasks.md`
-4. `dev/active/metacog-dynamic-shifting/design.md`
-5. `.context/phases/README.md`
-6. `.context/phases/phase-4.md` (note: physical file naming is still shifted)
-
----
-
-## Previous Handoffs
-
-### Phase 3 Checkpoint F (COMPLETE)
-- Settings UI, integration tests (9 Rust + 7 frontend), manual test playbook (8 scenarios)
-
-### Phase 3 Checkpoint E (COMPLETE)
-- Stream detection, tool injection gating, context tool interception + re-invoke loop, ~30 tests
-
-### Phase 3 Checkpoint D (COMPLETE)
-- Payload rewriter, mutation applicator, budget ceiling UI, ~50 tests
-
-### Phase 3 Checkpoint C (COMPLETE)
-- Autonomous heuristics, relevance scoring, file mutation tracking, 53 tests
-
-### Phase 3 Checkpoint B (COMPLETE)
-- Client adapters (Claude/Codex/Passive), ephemeral cleanup, 59 tests
-
-### Phase 3 Checkpoint A (COMPLETE)
-- Context Planner foundation, context tools, 69 tests
-
-### Earlier Phases (COMPLETE)
-- Phase Reorder + Metacognition Design (Session 14)
-- Phase 2 Post-Stabilization (Sessions 11-13)
-- Phase 1 + 1.5 (Sessions 1-10)
-
----
-
-## Session Workflow
-
-1. Read this file first
-2. Read current phase/checkpoint docs
-3. Continue from checkpoint
-4. Update RESUME.md before compaction (~70% context)
+- **Parser** (`proxy/parser/*`) — wire parsing → canonical `Block` records
+- **Rewriter** (`proxy/rewriter/*`) — JSON mutation, cleanup, trailing injection
+- **Planner** (`engine/planner/*`) — mutation planning, staged plans, heuristics
+- **Engine** (`engine/`) — session/block state, ingest, persistence, policy
+- **Handler** (`proxy/handler/*`) — upstream routing, transport filtering
+- **Interceptor** (`proxy/interceptor/*`) — context-tool interception, reinvoke
+- **Capture** (`proxy/capture/*`) — capture store, SSE reconstruction
+- **MCP** (`mcp/*`) — JSON-RPC transport, tool routing, session affinity

@@ -3,6 +3,8 @@
 Backend-to-frontend data flow, IPC commands, events, module inventory,
 and the localStorage-to-SQLite migration strategy.
 
+Last updated: 2026-02-19
+
 ---
 
 ## 1. Data Flow Diagram
@@ -49,12 +51,12 @@ and the localStorage-to-SQLite migration strategy.
                                                └────────────────────────┘
 ```
 
-**Request lifecycle (Phase 1, when wired):**
+**Request lifecycle (current):**
 
 1. Client tool sends HTTP request to `127.0.0.1:5400`
 2. `proxy_handler` assigns a `request_id` (UUID v4), detects upstream (Anthropic/OpenAI)
 3. `forward_request` streams the body to the upstream API via `reqwest`
-4. Engine parses request/response into `Block` structs (Phase 2)
+4. Engine parses request/response into `Block` structs
 5. Events are emitted to the frontend over Tauri event channels
 6. Svelte stores update reactively, driving the visualization
 
@@ -107,9 +109,10 @@ These events are emitted **now** by the terminal subsystem.
 
 ---
 
-## 4. Planned Events (Phase 1)
+## 4. Aperture Events
 
-Defined in `src-tauri/src/events/types.rs` but **not yet emitted**. The `ApertureEvent` enum is tagged with `#[serde(tag = "type", rename_all = "snake_case")]`.
+Defined in `src-tauri/src/events/types.rs` and emitted through `src-tauri/src/events/dispatcher.rs`.
+The `ApertureEvent` enum is tagged with `#[serde(tag = "type", rename_all = "snake_case")]`.
 
 ### Channel: `aperture:events`
 
@@ -126,21 +129,23 @@ Defined in `src-tauri/src/events/types.rs` but **not yet emitted**. The `Apertur
 |---------------|--------|---------|
 | `response_streaming` | `request_id`, `bytes_received` | High-frequency SSE progress updates (separated to avoid flooding the main channel) |
 
-**Wiring plan:** The proxy handler will call `app_handle.emit("aperture:events", event)` after parsing each request/response. Streaming updates go to the dedicated `aperture:stream-progress` channel to keep the main event bus low-frequency.
+Streaming updates use the dedicated `aperture:stream-progress` channel to keep the main event bus low-frequency.
 
 ---
 
-## 5. Backend Module Map
+## 5. Backend Module Map (Current)
 
 All modules live under `src-tauri/src/`.
 
 | Module | Files | Status | Purpose |
 |--------|-------|--------|---------|
-| `proxy/` | `mod.rs`, `handler.rs`, `error.rs` | **Active** | Transparent HTTP proxy. Binds port 5400, detects upstream (Anthropic/OpenAI) by headers/path, forwards requests via `reqwest`, streams SSE responses back. |
-| `terminal/` | `mod.rs`, `session.rs`, `error.rs` | **Active** | PTY-backed embedded terminal. Manages shell sessions (spawn, write, resize, kill) with Tauri IPC. Reader thread emits output/exit events. |
-| `engine/` | `mod.rs`, `block.rs`, `types.rs` | **Skeleton** (Phase 0.5) | Context engine data model. Defines `Block`, `Role`, `Zone`, `CompressionLevel`, `PinPosition`, and compression version structs. No processing logic yet. |
-| `events/` | `mod.rs`, `types.rs` | **Skeleton** (Phase 0.5) | Event type definitions. `ApertureEvent` enum and channel name constants. Not yet wired to emit from the proxy or engine. |
-| `lib.rs` | — | **Active** | App entry point. Loads `.env`, initializes logging (`tracing`), spawns proxy on a background thread with its own tokio runtime, registers Tauri commands, starts the Tauri app. |
+| `proxy/` | `mod.rs`, `handler.rs`, `handler/*`, `parser/*`, `rewriter/*`, `interceptor/*`, `capture/*`, `context_api.rs`, `runaway_guard.rs` | **Active** | Transparent HTTP proxy plus context-aware rewrite/capture/interception pipeline and internal tool API surface. |
+| `engine/` | `mod.rs`, `ingest.rs`, `session_sync.rs`, `planner/*`, `storage.rs`, `zone.rs`, etc. | **Active** | Authoritative session/block state, planning, mutation lifecycle, budgeting, and persistence. |
+| `metacog/` | `mod.rs`, `tools.rs`, `runtime.rs`, provider runtimes | **Active** | Context tool definitions/dispatch and runtime/provider-specific behavior. |
+| `mcp/` | `mod.rs`, `server.rs` | **Active** | MCP JSON-RPC server runtime for `aperture_mcp` binary. |
+| `terminal/` | `mod.rs`, `session.rs`, `codex_bridge.rs`, `error.rs` | **Active** | PTY-backed embedded terminal and Codex bridge ingestion loop. |
+| `events/` | `mod.rs`, `types.rs`, `dispatcher.rs` | **Active** | Event type definitions and dispatcher wiring used by proxy/engine flows. |
+| `lib.rs` | — | **Active** | Tauri entrypoint, command registration, engine/proxy/dispatcher wiring. |
 
 **Dependency highlights:**
 - Proxy uses `axum` (routing, handlers) + `reqwest` (upstream HTTP) + `tokio` (async runtime)
@@ -150,9 +155,9 @@ All modules live under `src-tauri/src/`.
 
 ---
 
-## 6. localStorage → Backend Migration Strategy
+## 6. localStorage → Backend Migration Notes
 
-### Current State (Phase 0–1): localStorage Only
+### Current Frontend Persistence: localStorage (debounced)
 
 All persistent frontend state lives in `localStorage` with debounced writes:
 
@@ -169,7 +174,7 @@ All persistent frontend state lives in `localStorage` with debounced writes:
 
 **Safety net:** `flushPendingWrites()` is called on `beforeunload` to ensure debounced data is not lost when the window closes.
 
-### Phase 2 Target: SQLite for Structured Data
+### Planned Target: SQLite for Structured Data
 
 ```
 ┌─────────────────────────────────────┐
