@@ -28,10 +28,10 @@
 14. `phase-13.md` — Plugins and Ecosystem *(was Phase 12)*
 
 > **Note**: `phase-3.md` has been replaced with the new metacog content.
-> The old compression content (logically Phase 4) is preserved in `dev/active/phase-4-compression-readiness/`.
+> The old compression content (logically Phase 4) is preserved in `dev/phase-4/`.
 > Phase files `phase-4.md` through `phase-12.md` have not been physically renamed yet — each is logically shifted +1.
 > Physical rename will happen at next major checkpoint.
-> Current remediation artifacts: `dev/active/metacog-dynamic-shifting/staff-review-2026-02-13.md`, `plan.md`, `tasks.md`.
+> Current remediation artifacts: `dev/metacog-design/staff-review-2026-02-13.md`, `dev/phase-4/plan.md`, `dev/phase-4/tasks.md`.
 
 ---
 
@@ -62,10 +62,10 @@ Phase 3 (metacognition + shifting) and Phase 4 (compression) are tightly coupled
 
 | Document | Purpose |
 |----------|---------|
-| `dev/active/metacog-dynamic-shifting/design.md` | Phase 3 architecture: vision, philosophy, workflows, tool surface, cleanup system |
-| `dev/active/context-awareness/design.md` | Original metacognition brainstorm (superseded by above, kept for reference) |
-| `dev/active/phase-4-compression-readiness/` | Compression planning (Phase 4 readiness, renamed from phase-3-readiness) |
-| `dev/active/codex-proxy-research-2026-02-09/` | Codex proxy research and provider models |
+| `dev/metacog-design/design.md` | Phase 3 architecture: vision, philosophy, workflows, tool surface, cleanup system |
+| `dev/research/context-awareness/design.md` | Original metacognition brainstorm (superseded by above, kept for reference) |
+| `dev/phase-4/` | Compression planning, token economics, diagnostic investigation |
+| `dev/research/codex-proxy/` | Codex proxy research and provider models |
 
 ---
 
@@ -74,6 +74,6 @@ Phase 3 (metacognition + shifting) and Phase 4 (compression) are tightly coupled
 1. Confirm branch and working tree (`git status --short`).
 2. Read `.context/RESUME.md` current state + next step.
 3. Read current phase doc and copy its success criteria into an execution checklist.
-4. Read `dev/active/metacog-dynamic-shifting/design.md` for Phase 3 architecture context.
+4. Read `dev/metacog-design/design.md` for Phase 3 architecture context.
 5. Run `make check` before and after implementation.
 6. Update `RESUME.md` and the phase doc at checkpoint/phase completion.

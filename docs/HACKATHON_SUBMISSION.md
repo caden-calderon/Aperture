@@ -102,7 +102,7 @@ See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the full design. Key modules:
 7. Show `compress`, `recall`, `pin` operations
 8. Show the settings panel — drag the budget ceiling slider
 
-**Demo prompts**: `dev/active/phase-4-compression-readiness/manual-test-prompts.md`
+**Demo prompts**: `dev/phase-4/manual-test-prompts.md`
 
 ## Build & Run
 
@@ -119,7 +119,7 @@ make check      # Full quality gate
 
 This project was built with systematic engineering practices:
 - **Phase discipline**: UI-first (Phase 0) → Proxy (Phase 1) → Engine (Phase 2) → Metacognition (Phase 3) → Token Economics (Phase 4)
-- **10 rounds of diagnostic investigation** with JSONL log analysis, hypothesis tracking, and fix verification (see `dev/active/phase-4-compression-readiness/`)
+- **10 rounds of diagnostic investigation** with JSONL log analysis, hypothesis tracking, and fix verification (see `dev/diagnostics/`)
 - **3 refactor tranches** splitting oversized modules into focused boundaries before fixing bugs
 - **Test-driven fixes**: Every bug fix includes regression tests
 
@@ -128,4 +128,4 @@ This project was built with systematic engineering practices:
 1. [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) — System design
 2. [`docs/REPO_STRUCTURE.md`](REPO_STRUCTURE.md) — Code layout
 3. [`docs/INTEGRATION.md`](INTEGRATION.md) — Frontend/backend contracts
-4. [`dev/active/`](../dev/active/README.md) — Active workstreams and investigation reports
+4. [`dev/`](../dev/README.md) — Diagnostic investigations, design history, and research
