@@ -39,9 +39,10 @@ If documentation conflicts, follow this file first, then `docs/DOC_LIFECYCLE.md`
 
 ## Session Memory Docs (`.context/`)
 - `.context/RESUME.md` is the only required entrypoint for context carry-over.
-- Other `.context/*.md` files are working notes, analyses, or historical prompts.
-- Historical notes are moved under `.context/archive/`.
-- See `.context/README.md` for classification and status of each file.
+- `.context/CODE_STANDARDS.md` — Rust/Svelte coding conventions.
+- `.context/FRONTEND_INVENTORY.md` — Component registry and localStorage keys.
+- `.context/phases/` — Phase design documents (phases 0–12).
+- All session prompts and diagnostic artifacts are in `.context/archive/`.
 
 ## Archive Docs
 - `docs/archive/README.md`: index of archived product/reference docs.

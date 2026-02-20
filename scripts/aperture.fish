@@ -4,6 +4,8 @@
 function aperture --description "Launch AI tools through Aperture proxy"
     set -l APERTURE_PORT 5400
     set -l APERTURE_URL "http://localhost:$APERTURE_PORT"
+    # Override APERTURE_DIR if Aperture is not installed at ~/projects/Aperture
+    set -l APERTURE_DIR (set -q APERTURE_DIR; and echo $APERTURE_DIR; or echo "$HOME/projects/Aperture")
 
     # Check if Aperture is running
     if not nc -z localhost $APERTURE_PORT 2>/dev/null
@@ -43,7 +45,7 @@ function aperture --description "Launch AI tools through Aperture proxy"
 
         case "start"
             echo "Starting Aperture..."
-            cd ~/projects/Aperture && npm run tauri dev &
+            cd $APERTURE_DIR && npm run tauri dev &
             disown
             echo "Aperture starting in background. Wait a few seconds then run your tool."
 

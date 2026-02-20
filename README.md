@@ -29,6 +29,14 @@ Aperture sits as a transparent local proxy between your AI coding tool and the p
 
 ## Quick Start
 
+### Platform Support
+
+| Platform | Status | Notes |
+|----------|--------|-------|
+| Linux | Tested | Primary development platform |
+| macOS | Should work | Tauri supports macOS; not actively tested |
+| Windows | Not supported | WebView2 backend untested; no Windows CI |
+
 ### Prerequisites
 
 - **Node.js 20+**
@@ -62,7 +70,6 @@ make dev
 **Claude Code:**
 ```bash
 ANTHROPIC_BASE_URL=http://localhost:5400 claude
-# Or use: aperture claude (if installed via the CLI)
 ```
 
 **Codex CLI:**
@@ -71,6 +78,27 @@ OPENAI_BASE_URL=http://localhost:5400 codex
 ```
 
 The proxy forwards all requests transparently. Your AI tool works exactly as before, but now Aperture is watching and can manage context.
+
+### Optional: Install the CLI Helper
+
+A convenience wrapper (`aperture claude`, `aperture start`, `aperture status`) is available for bash, zsh, and fish:
+
+```bash
+./scripts/install.sh
+```
+
+After installing, restart your shell and use `aperture claude` instead of setting env vars manually.
+
+### MCP Tools (Optional)
+
+Aperture includes a standalone MCP server that lets the AI inspect and manage its own context. To use it with Claude Code, build first then copy the example config:
+
+```bash
+# After make install, the MCP binary is at src-tauri/target/debug/aperture-mcp
+cp .mcp.json.example .mcp.json
+# Then launch Claude Code — it will auto-discover the MCP server
+ANTHROPIC_BASE_URL=http://localhost:5400 claude
+```
 
 ### Run Quality Gates
 
