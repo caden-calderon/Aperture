@@ -146,14 +146,13 @@ See `docs/ARCHITECTURE.md` for the full design and `docs/REPO_STRUCTURE.md` for 
 
 | Doc | What It Covers |
 |-----|----------------|
+| [`docs/OVERVIEW.md`](docs/OVERVIEW.md) | Project motivation, how it works, workflows, roadmap |
 | [`docs/HACKATHON_SUBMISSION.md`](docs/HACKATHON_SUBMISSION.md) | Submission snapshot — what works, known issues, demo guide |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | System architecture and design decisions |
 | [`docs/REPO_STRUCTURE.md`](docs/REPO_STRUCTURE.md) | Code layout and module ownership |
 | [`docs/INTEGRATION.md`](docs/INTEGRATION.md) | Frontend/backend IPC contracts |
 | [`docs/DOCS_INDEX.md`](docs/DOCS_INDEX.md) | Full documentation navigation map |
-| [`dev/active/`](dev/active/README.md) | Active development workstreams and diagnostic reports |
-
-> **Note:** `.context/` contains development session working memory (resume points, diagnostic prompts, investigation notes). It's part of the development workflow, not the submission — see `docs/` for canonical documentation.
+| [`dev/`](dev/README.md) | Development working docs: phase plans, diagnostics, research |
 
 ## Tech Stack
 

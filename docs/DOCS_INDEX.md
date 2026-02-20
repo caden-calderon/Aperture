@@ -1,56 +1,57 @@
 # Documentation Index
 
-Last updated: 2026-02-19
+Last updated: 2026-02-20
 
-This is the canonical navigation map for documentation in this repo.
-If documentation conflicts, follow this file first, then `docs/DOC_LIFECYCLE.md`.
+This is the canonical navigation map for Aperture documentation.
+When in doubt, prefer `docs/` over `dev/` over `.context/`.
 
-## Start Here (Fresh Context)
-1. `README.md`
-2. `docs/DOCS_INDEX.md`
-3. `docs/HACKATHON_SUBMISSION.md`
-4. `.context/RESUME.md`
-5. `dev/active/phase-4-compression-readiness/context.md`
-6. `dev/active/phase-4-compression-readiness/tasks.md`
-7. `dev/active/phase-4-compression-readiness/plan.md`
+## Start Here
 
-## Documentation Authority
-- `docs/`: stable reference docs intended to remain valid over time.
-- `dev/active/`: execution artifacts (plans, tasks, session context) by initiative.
-- `.context/`: working-memory artifacts for iterative sessions; can include historical or superseded notes.
-- `docs/archive/`, `.context/archive/`: historical reference only, never source of truth.
+| Goal | Where to Go |
+|------|-------------|
+| Understand the project | [`docs/OVERVIEW.md`](OVERVIEW.md) |
+| Quick setup | [`README.md`](../README.md) |
+| Hackathon submission snapshot | [`docs/HACKATHON_SUBMISSION.md`](HACKATHON_SUBMISSION.md) |
+| System architecture | [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) |
+| Current dev state | [`dev/phase-4/context.md`](../dev/phase-4/context.md) |
 
 ## Canonical Reference Docs (`docs/`)
-- `docs/ARCHITECTURE.md`: high-level architecture and runtime boundaries.
-- `docs/INTEGRATION.md`: Tauri IPC/events/frontend-backend integration reference.
-- `docs/PROVIDER_CAPABILITY_MATRIX.md`: provider/runtime capability matrix.
-- `docs/SECURITY_BASELINE.md`: security constraints and hardening requirements.
-- `docs/REPO_STRUCTURE.md`: repository layout and ownership boundaries.
-- `docs/DOC_LIFECYCLE.md`: doc location, naming, archival, and update rules.
-- `docs/HACKATHON_SUBMISSION.md`: concise project overview and demo/readiness snapshot.
 
-## Active Execution Docs (`dev/active/`)
-- Active phase now: `dev/active/phase-4-compression-readiness/`.
-- Track-local source of truth is always the trio:
-  - `context.md`
-  - `tasks.md`
-  - `plan.md`
-- Older tracks under `dev/active/` are historical references unless explicitly reactivated.
+| Doc | What It Covers |
+|-----|----------------|
+| `OVERVIEW.md` | Project motivation, how it works, workflows, roadmap |
+| `ARCHITECTURE.md` | Three-layer architecture, module ownership, design decisions |
+| `INTEGRATION.md` | Frontend/backend IPC contracts, Tauri events, localStorage |
+| `REPO_STRUCTURE.md` | Code layout and module ownership |
+| `PROVIDER_CAPABILITY_MATRIX.md` | Provider/runtime capability baseline |
+| `SECURITY_BASELINE.md` | Security constraints and hardening requirements |
+| `DOC_LIFECYCLE.md` | Doc location, naming, archival, and update rules |
+| `HACKATHON_SUBMISSION.md` | Submission snapshot — what works, known issues, demo guide |
 
-## Session Memory Docs (`.context/`)
-- `.context/RESUME.md` is the only required entrypoint for context carry-over.
-- `.context/CODE_STANDARDS.md` — Rust/Svelte coding conventions.
-- `.context/FRONTEND_INVENTORY.md` — Component registry and localStorage keys.
-- `.context/phases/` — Phase design documents (phases 0–12).
-- All session prompts and diagnostic artifacts are in `.context/archive/`.
+## Phase Design Docs (`docs/phases/`)
 
-## Archive Docs
-- `docs/archive/README.md`: index of archived product/reference docs.
-- `.context/archive/README.md`: index of archived session working notes.
+Architectural design documents for each development phase. These describe the *what* and *why*
+of each phase's design before implementation.
 
-## Naming and Organization Rules
-- New durable docs belong in `docs/`.
-- New execution/phase docs belong in `dev/active/<initiative>/`.
-- `.context/` should not be used as permanent architecture/API reference.
-- Prefer descriptive kebab-case names (avoid whimsical names for long-lived docs).
-- When a note is no longer active, move it to an archive folder and keep an index entry.
+See [`docs/phases/README.md`](phases/README.md) for the full phase index and status.
+
+## Active Development (`dev/`)
+
+Working artifacts from building Aperture. See [`dev/README.md`](../dev/README.md).
+
+| Dir | What's There |
+|-----|--------------|
+| `dev/phase-4/` | Current phase: token economics, refactor, bug-dive |
+| `dev/diagnostics/` | 10 deep-dive debugging rounds for plan layering failure |
+| `dev/metacog-design/` | Phase 3 design: metacognition + dynamic context shifting |
+| `dev/research/` | Provider research (Codex, OpenAI Responses API, modularity) |
+| `dev/audits/` | Quality/security audits from earlier phases |
+
+## Archive
+
+- `docs/archive/` — historical product/reference docs (never source of truth)
+- `docs/archive/APERTURE-brainstorm.md` — original 74K design brainstorm (legacy)
+
+## Authority Order
+
+`docs/` > `dev/` > `.context/` (local-only, gitignored)

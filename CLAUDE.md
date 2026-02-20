@@ -12,11 +12,13 @@ Universal LLM context visualization, management, and control proxy.
 
 | File | Purpose |
 |------|---------|
-| `docs/archive/APERTURE-brainstorm.md` | Archived original design brainstorm (legacy reference, not source of truth) |
 | `.claude/skills/aperture-ui.md` | UI design system (colors, typography, animations, dithering spec) |
-| `.context/RESUME.md` | Current state, what to read, next steps |
-| `.context/phases/phase-N.md` | Phase-specific implementation details |
-| `reference/context-forge-prototype.html` | Working HTML prototype |
+| `.context/RESUME.md` | **Session entry point** — current state, what to read, next steps (local-only, gitignored) |
+| `docs/phases/phase-N.md` | Phase-specific design and implementation details |
+| `dev/phase-4/` | Current active phase working docs |
+
+> **Note:** `.context/` is gitignored — it lives only on your local machine as session working memory.
+> `docs/` and `dev/` are in git. See `docs/DOCS_INDEX.md` for the full navigation map.
 
 ## Build Strategy
 
@@ -63,7 +65,7 @@ npm run check         # svelte-check
 
 ## Session Workflow
 
-1. Read `.context/RESUME.md` first
-2. Read current phase file
+1. Read `.context/RESUME.md` first (local-only, not in git)
+2. Read `dev/phase-4/context.md` for current state
 3. Continue from checkpoint
-4. Update RESUME.md before compaction (~70% context)
+4. Update `.context/RESUME.md` before compaction (~70% context)
