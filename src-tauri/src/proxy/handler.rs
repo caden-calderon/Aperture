@@ -469,6 +469,20 @@ async fn forward_request(
         .capture
         .capture_request(request_id, path, capture_body);
 
+    // Fix H9: When the body was rewritten (archival removed early turns), the
+    // capture parsed the POST-REWRITE body which may have a different
+    // thread_identity than the PRE-REWRITE body. Override with the PRE-REWRITE
+    // identity so ingest (via finalize_exchange) resolves the same session as
+    // the rewriter. Without this, plans get committed under session_B (ingest)
+    // but the rewriter reads from session_A → plans never fire.
+    if parsed.is_some() {
+        if let Some(ref pre_rewrite) = parsed_for_rewrite {
+            state
+                .capture
+                .set_thread_identity(request_id, pre_rewrite.thread_identity.clone());
+        }
+    }
+
     if let (Some(ref dispatcher), Some(ref parsed)) = (&state.dispatcher, &parsed) {
         dispatcher.request_captured(request_id, method, path, &parsed.provider.to_string());
     }

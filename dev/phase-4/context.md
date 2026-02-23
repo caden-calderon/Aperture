@@ -1,8 +1,57 @@
 # Phase 4 Token Economics Context
 
-## Current State (2026-02-20)
+## Current State (2026-02-23)
 
-**Manual test Round 10 PASSED.** 2 successful context cleans. All 3 fixes (Option B, diagnostic tracing, MCP retry) implemented. 696 tests passing (643 Rust + 53 frontend), clippy clean. Log analysis pending for H1/H2 root cause confirmation.
+**ALL 3 FIXES VERIFIED IN R14 MANUAL TEST. Plan layering regression RESOLVED.**
+
+After 3 sessions of deep diagnostic work (R11→R13), the root cause is proven by integration test:
+
+**Bug**: After cumulative archival removes early turns, POST-REWRITE body produces a different `thread_identity` than PRE-REWRITE body. MCP tools fall back to `active_session_id()` (set by ingest from POST-REWRITE), while the rewriter resolves from PRE-REWRITE identity. Plans get committed under session_B but the rewriter reads from session_A.
+
+**Evidence chain**:
+1. `test_h9_thread_identity_diverges_after_early_turn_removal` — PASSES (identities diverge)
+2. `context_api.rs:243` — MCP falls back to `active_session_id()` when no explicit session
+3. `ingest.rs:26` — `ensure_session()` with POST-REWRITE identity sets active session
+4. Control test: middle-turn removal preserves identity (anchors intact)
+
+**Fix 1 (DONE)**: Pass PRE-REWRITE thread_identity through capture exchange to ingest. `capture.rs:set_thread_identity()` + `handler.rs:471-481`.
+**Fix 2 (DONE)**: Guard breadcrumb on `pending_plan.is_some()` — re-application shouldn't breadcrumb. `planner/mod.rs:547+651`.
+**Fix 3 (DONE)**: Turn-aware MCP tool stripping. "Last assistant message" boundary — strip stale MCP tools, preserve recent. All 3 API formats. `planner/cleanup.rs`.
+
+708 tests passing (655 Rust + 53 frontend), clippy clean.
+
+### R14 Manual Test (2026-02-23) — VERIFIED
+- **4+ cleans all fired correctly** — plan layering regression RESOLVED
+- Plans stacked across turns, all stayed stripping, session continued fine
+- `/context` Messages row shows cumulative JSONL size (220k+) while budget % is correct (50%)
+  - This is expected: JSONL holds full history, Aperture strips ~200k per turn via proxy
+  - Useful signal for archival — JSONL preserves everything
+- **New bug**: Parallel MCP calls crash the proxy (connection refused on port 5400)
+  - Triggered when Claude fires status + 2 searches simultaneously
+  - Proxy auto-restarts, engine reloads from SQLite, but brief partial-reload window
+  - Fix: serialize Aperture MCP calls (tokio Mutex queue) or handle concurrency in engine
+- **New observation**: Claude pauses after MCP tool calls, waits for "continue" prompt
+  - Happens after plan/stage/commit — says it will do something, then stops
+  - May be related to tool_result format or missing continuation signal
+- **Improvement idea**: Block ID display aliases (B1, B42 instead of hex UUIDs)
+  - Reduces friction for manual management
+  - Status truncates at ~86 blocks — search needed for large sessions
+  - Keep UUIDs internally, expose aliases in preview/status
+
+### R11 (2026-02-21, during hackathon demo filming)
+- Rounds 1+2 fired correctly (4+5 = 9 blocks archived, persisted across turns)
+- Round 3 (13 blocks) committed successfully (MCP returned success) but NEVER fired
+- `/context` kept growing (conversation overhead outpaced archival) confirming blocks NOT removed
+- Breadcrumb never showed round 3 additions
+
+### R12 (2026-02-21)
+- 2 successful cleans, 3rd round failed (same pattern as R11)
+
+### Hypotheses for 3rd-round failure
+- **H3**: `add_persistent_archives_for_session()` replaces existing list instead of merging on 3rd call
+- **H4**: Block IDs in 3rd plan don't match blocks currently in session store (stale IDs after 2 rounds of archival)
+- **H5**: Session ID diverges after multiple plan cycles (accumulation of state drift)
+- **H6**: Capacity/size issue in persistent_archived_ids that manifests at 3+ rounds
 
 ### What's Fixed (Cumulative)
 
@@ -76,24 +125,30 @@ Works regardless of whether root cause is H1 or H2.
 
 ## Next Action
 
-**Analyze Round 10 JSONL logs:**
-1. Grep for `R9-DIAG` in proxy logs — compare session IDs across trace points
-2. Confirm H1 vs H2 root cause
-3. Assess breadcrumb delta bug fix approach
-4. Downgrade diagnostic tracing to `debug!()` after confirmation
+**Analyze R14 manual test logs (both sessions) for remaining issues:**
+1. "whats up sonnet" session (~1-2 days ago)
+2. "Yooo" session (today, 2026-02-23)
+3. Investigate: parallel MCP crash (race condition / concurrency), Claude pausing behavior
+4. Document findings, plan fixes
 
 ## Remaining Work (Priority Order)
 
 1. ~~Implement R9-1 Option B fix~~ — **DONE**
 2. ~~Add diagnostic tracing~~ — **DONE**
 3. ~~Add MCP call_proxy retry~~ — **DONE**
-4. ~~Manual test Round 10~~ — **PASSED (2 successful cleans)**
-5. **Check diagnostic logs** — confirm H1 vs H2
-6. **Fix breadcrumb delta bug** — low severity, delta shows +0 on re-archival
-7. **Fix budget % gap** — include overhead in engine budget calculation
-8. **Fix D: Cache + Archival Death Spiral** — cache-aware archival strategy
-9. **P1: Economics Ledger** — token cost instrumentation
-10. **P3: Schema Overhead Reduction** — consolidate tools, lazy injection
+4. ~~Manual test Round 10~~ — **PASSED**
+5. ~~Fix 1 (session divergence)~~ — **DONE**
+6. ~~Fix 2 (breadcrumb guard)~~ — **DONE**
+7. ~~Fix 3 (MCP tool stripping)~~ — **DONE**
+8. ~~Manual test Round 14~~ — **PASSED (4+ cleans, regression resolved)**
+9. **Analyze R14 logs** — parallel MCP crash, Claude pausing, other observations
+10. **Fix parallel MCP crash** — serialize with tokio Mutex or add request queue
+11. **Block ID display aliases** — B1/B42 style aliases mapped to UUIDs
+12. **Fix breadcrumb delta bug** — low severity, delta shows +0 on re-archival
+13. **Fix budget % gap** — include overhead in engine budget calculation
+14. **Fix D: Cache + Archival Death Spiral** — cache-aware archival strategy
+15. **P1: Economics Ledger** — token cost instrumentation
+16. **P3: Schema Overhead Reduction** — consolidate tools, lazy injection
 
 See `tasks.md` for full checklist with subtasks.
 

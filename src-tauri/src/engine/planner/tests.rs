@@ -1013,6 +1013,109 @@ fn test_planner_no_breadcrumb_without_mutations() {
     assert!(output.cleanup.breadcrumb.is_none());
 }
 
+/// Fix 2: Persistent re-application produces mutations but should NOT generate
+/// a breadcrumb. Only new pending plans should breadcrumb.
+#[test]
+fn test_persistent_reapplication_no_breadcrumb() {
+    let planner = ContextPlanner::with_default_config();
+    let session = "breadcrumb-guard";
+
+    // Set up persistent archives (simulate a previously committed plan)
+    let mutations = vec![
+        ContextMutation::Archive {
+            block_id: "b1".into(),
+        },
+        ContextMutation::Archive {
+            block_id: "b2".into(),
+        },
+    ];
+    planner.add_persistent_archives_for_session(session, &mutations);
+
+    // Re-application turn: no pending plan, but b1 and b2 are in request_block_ids
+    let input = PlannerInput {
+        blocks: vec![mock_block("b3", Role::User, BuiltInZone::Recency, 500)],
+        request_block_ids: ["b1", "b2", "b3"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        pending_plan: None,
+        signals: Default::default(),
+        file_mutations: None,
+        budget: mock_budget(50_000, 200_000),
+    };
+
+    let output = planner.plan_for_session(session, &input);
+
+    // Mutations SHOULD exist (rewriter needs them to strip blocks)
+    assert!(
+        output.cleanup.has_cleanup,
+        "re-application should produce mutations"
+    );
+    let archive_count = output
+        .mutations
+        .iter()
+        .filter(|m| matches!(m, ContextMutation::Archive { .. }))
+        .count();
+    assert_eq!(archive_count, 2, "should re-apply 2 persistent archives");
+
+    // Breadcrumb should NOT exist (no new plan was consumed)
+    assert!(
+        output.cleanup.breadcrumb.is_none(),
+        "persistent re-application should NOT generate breadcrumb"
+    );
+}
+
+/// Verify that a NEW pending plan still generates a breadcrumb after Fix 2.
+#[test]
+fn test_new_pending_plan_still_generates_breadcrumb() {
+    let planner = ContextPlanner::with_default_config();
+    let session = "breadcrumb-new";
+
+    // Also set up some persistent archives to exercise both paths
+    planner.add_persistent_archives_for_session(
+        session,
+        &[ContextMutation::Archive {
+            block_id: "old1".into(),
+        }],
+    );
+
+    let pending = PendingPlan {
+        mutations: vec![ContextMutation::Archive {
+            block_id: "b2".into(),
+        }],
+        token_delta: -500,
+        projected_block_count: 1,
+        projected_utilization: 0.25,
+    };
+
+    let input = PlannerInput {
+        blocks: vec![
+            mock_block("b1", Role::User, BuiltInZone::Recency, 500),
+            mock_block("b2", Role::Assistant, BuiltInZone::Middle, 500),
+        ],
+        request_block_ids: ["old1", "b1", "b2"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        pending_plan: Some(pending),
+        signals: Default::default(),
+        file_mutations: None,
+        budget: mock_budget(50_000, 200_000),
+    };
+
+    let output = planner.plan_for_session(session, &input);
+    assert!(output.cleanup.has_cleanup);
+    assert!(
+        output.cleanup.breadcrumb.is_some(),
+        "new pending plan should generate breadcrumb"
+    );
+    let breadcrumb = output.cleanup.breadcrumb.as_ref().unwrap();
+    assert!(
+        breadcrumb.contains("archived"),
+        "breadcrumb should mention archival"
+    );
+}
+
 // ── Heuristic Integration Tests ──────────────────────────
 
 #[test]
@@ -1760,5 +1863,148 @@ fn test_add_persistent_archives_idempotent() {
     assert_eq!(
         archive_count, 1,
         "Idempotent: duplicate persistent archives should produce exactly one mutation"
+    );
+}
+
+/// R12 regression reproduction: 3 sequential commit rounds (4+5+13 blocks).
+/// Rounds 1+2 work correctly. Round 3 (13 blocks) should also accumulate
+/// into persistent_archived_ids and fire on subsequent turns.
+///
+/// This simulates the EXACT flow from the R12 manual test:
+/// 1. Commit R1 (4 blocks) → consume pending plan → persistent has 4
+/// 2. Re-application turn (no pending plan) → 4 mutations from persistent
+/// 3. Commit R2 (5 blocks) → consume pending plan → persistent has 9
+/// 4. Re-application turn → 9 mutations from persistent
+/// 5. Commit R3 (13 blocks) → consume pending plan → persistent has 22
+/// 6. Re-application turn → 22 mutations from persistent  ← THIS IS THE REGRESSION
+#[test]
+fn test_three_round_plan_layering_r12_regression() {
+    let planner = ContextPlanner::with_default_config();
+    let session = "session1";
+
+    // All block IDs that will be archived across 3 rounds
+    let r1_ids: Vec<String> = (0..4).map(|i| format!("r1_b{i}")).collect();
+    let r2_ids: Vec<String> = (0..5).map(|i| format!("r2_b{i}")).collect();
+    let r3_ids: Vec<String> = (0..13).map(|i| format!("r3_b{i}")).collect();
+
+    // All block IDs present in every request (stateless client re-sends everything)
+    let all_ids: HashSet<String> = r1_ids
+        .iter()
+        .chain(r2_ids.iter())
+        .chain(r3_ids.iter())
+        .cloned()
+        .collect();
+
+    // Helper: simulate a commit (stage → commit → add_persistent_archives)
+    let commit_round = |ids: &[String]| {
+        let mutations: Vec<ContextMutation> = ids
+            .iter()
+            .map(|id| ContextMutation::Archive {
+                block_id: id.clone(),
+            })
+            .collect();
+        // Stage
+        let plan = PendingPlan {
+            mutations: mutations.clone(),
+            token_delta: -(ids.len() as i64 * 1000),
+            projected_block_count: 50,
+            projected_utilization: 0.3,
+        };
+        planner.set_staged_plan_for_session(session, plan);
+        // Commit
+        let committed = planner.commit_staged_plan_for_session(session).unwrap();
+        // Eagerly persist (the R9-1 fix)
+        planner.add_persistent_archives_for_session(session, &committed.mutations);
+        committed
+    };
+
+    // Helper: simulate the rewriter consuming the pending plan
+    let consume_pending_plan = || -> PlannerOutput {
+        let pending = planner.take_pending_plan_for_session(session);
+        let input = PlannerInput {
+            blocks: vec![], // Engine blocks (stubs, not important for this test)
+            request_block_ids: all_ids.clone(),
+            pending_plan: pending,
+            signals: Default::default(),
+            file_mutations: None,
+            budget: mock_budget(100_000, 200_000),
+        };
+        planner.plan_for_session(session, &input)
+    };
+
+    // Helper: simulate a re-application turn (no pending plan)
+    let reapplication_turn = || -> PlannerOutput {
+        assert!(
+            !planner.has_pending_plan_for_session(session),
+            "No pending plan should exist on re-application turns"
+        );
+        let input = PlannerInput {
+            blocks: vec![],
+            request_block_ids: all_ids.clone(),
+            pending_plan: None,
+            signals: Default::default(),
+            file_mutations: None,
+            budget: mock_budget(100_000, 200_000),
+        };
+        planner.plan_for_session(session, &input)
+    };
+
+    let count_archives = |output: &PlannerOutput| -> usize {
+        output
+            .mutations
+            .iter()
+            .filter(|m| matches!(m, ContextMutation::Archive { .. }))
+            .count()
+    };
+
+    // ── Round 1: Commit 4 blocks ──
+    commit_round(&r1_ids);
+    let output = consume_pending_plan();
+    assert_eq!(
+        count_archives(&output),
+        4,
+        "R1: pending plan should produce 4 archive mutations"
+    );
+
+    // Re-application: persistent should have 4
+    let output = reapplication_turn();
+    assert_eq!(
+        count_archives(&output),
+        4,
+        "R1 re-application: persistent archives should produce 4 mutations"
+    );
+
+    // ── Round 2: Commit 5 more blocks ──
+    commit_round(&r2_ids);
+    let output = consume_pending_plan();
+    assert_eq!(
+        count_archives(&output),
+        9, // 5 from pending + 4 from persistent re-application
+        "R2: pending plan (5) + persistent re-apply (4) = 9"
+    );
+
+    // Re-application: persistent should have 9
+    let output = reapplication_turn();
+    assert_eq!(
+        count_archives(&output),
+        9,
+        "R2 re-application: persistent archives should produce 9 mutations"
+    );
+
+    // ── Round 3: Commit 13 more blocks (the regression case) ──
+    commit_round(&r3_ids);
+    let output = consume_pending_plan();
+    assert_eq!(
+        count_archives(&output),
+        22, // 13 from pending + 9 from persistent re-application
+        "R3: pending plan (13) + persistent re-apply (9) = 22 — THIS IS THE REGRESSION"
+    );
+
+    // Re-application: persistent should have 22
+    let output = reapplication_turn();
+    assert_eq!(
+        count_archives(&output),
+        22,
+        "R3 re-application: persistent archives should produce 22 mutations"
     );
 }

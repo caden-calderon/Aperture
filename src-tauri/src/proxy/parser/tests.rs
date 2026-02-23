@@ -1357,6 +1357,118 @@ fn test_system_fingerprint_differs_for_real_content_changes() {
 }
 
 #[test]
+// --- H9 Hypothesis: Thread identity divergence after archival ---
+
+/// H9: After the rewriter removes early turns (archival), the POST-REWRITE body
+/// produces a different `thread_identity` than the PRE-REWRITE body. This is
+/// because `fallback_thread_identity()` hashes the first non-transient user
+/// message and first assistant message — if those get removed, the hash changes.
+///
+/// In the real proxy flow:
+///   1. Rewriter resolves session from PRE-REWRITE body → session A
+///   2. Rewriter removes turns (archival) → POST-REWRITE body
+///   3. Capture parses POST-REWRITE body → gets different thread_identity
+///   4. Ingest calls ensure_session with POST-REWRITE identity → session B
+///   5. session A != session B → plans stored under wrong session
+#[test]
+fn test_h9_thread_identity_diverges_after_early_turn_removal() {
+    // Original conversation: system + 10 messages (5 user/assistant pairs)
+    let body_original = serde_json::json!({
+        "model": "claude-sonnet-4-6",
+        "system": "You are Claude Code, Anthropic's official CLI.",
+        "messages": [
+            {"role": "user", "content": "Help me build a web server in Rust"},
+            {"role": "assistant", "content": "I'd be happy to help you build a web server in Rust."},
+            {"role": "user", "content": "Use axum for the framework please"},
+            {"role": "assistant", "content": "Sure, let me set up axum with tokio."},
+            {"role": "user", "content": "Now add JWT authentication"},
+            {"role": "assistant", "content": "Adding JWT authentication middleware."},
+            {"role": "user", "content": "Add rate limiting to the endpoints"},
+            {"role": "assistant", "content": "Adding rate limiting with governor crate."},
+            {"role": "user", "content": "Write integration tests"},
+            {"role": "assistant", "content": "Writing integration tests with reqwest."}
+        ]
+    });
+
+    // Post-rewrite: first 2 user/assistant pairs removed by archival.
+    // This simulates what the rewriter does with `remove_turns`.
+    let body_post_rewrite = serde_json::json!({
+        "model": "claude-sonnet-4-6",
+        "system": "You are Claude Code, Anthropic's official CLI.",
+        "messages": [
+            {"role": "user", "content": "Now add JWT authentication"},
+            {"role": "assistant", "content": "Adding JWT authentication middleware."},
+            {"role": "user", "content": "Add rate limiting to the endpoints"},
+            {"role": "assistant", "content": "Adding rate limiting with governor crate."},
+            {"role": "user", "content": "Write integration tests"},
+            {"role": "assistant", "content": "Writing integration tests with reqwest."}
+        ]
+    });
+
+    let pre = parse_anthropic_request(&serde_json::to_vec(&body_original).unwrap()).unwrap();
+    let post = parse_anthropic_request(&serde_json::to_vec(&body_post_rewrite).unwrap()).unwrap();
+
+    let pre_identity = pre.thread_identity.expect("should have fallback identity");
+    let post_identity = post.thread_identity.expect("should have fallback identity");
+
+    // H9: These MUST differ because fallback_thread_identity hashes the first
+    // user+assistant content, which changes when early turns are removed.
+    assert_ne!(
+        pre_identity, post_identity,
+        "H9 CONFIRMED: thread_identity diverges after removing early turns.\n  \
+         Pre-rewrite identity:  {pre_identity}\n  \
+         Post-rewrite identity: {post_identity}"
+    );
+}
+
+/// Verify the identity is stable when only MIDDLE turns are removed (not the
+/// first user/assistant pair). This establishes that the divergence is
+/// specifically caused by removing the anchor messages used for fallback hashing.
+#[test]
+fn test_thread_identity_stable_when_middle_turns_removed() {
+    let body_original = serde_json::json!({
+        "model": "claude-sonnet-4-6",
+        "system": "You are Claude Code, Anthropic's official CLI.",
+        "messages": [
+            {"role": "user", "content": "Help me build a web server in Rust"},
+            {"role": "assistant", "content": "I'd be happy to help you build a web server in Rust."},
+            {"role": "user", "content": "Use axum for the framework please"},
+            {"role": "assistant", "content": "Sure, let me set up axum with tokio."},
+            {"role": "user", "content": "Now add JWT authentication"},
+            {"role": "assistant", "content": "Adding JWT authentication middleware."},
+            {"role": "user", "content": "Write integration tests"},
+            {"role": "assistant", "content": "Writing integration tests with reqwest."}
+        ]
+    });
+
+    // Remove MIDDLE turns (axum + JWT) but keep the first pair intact.
+    let body_trimmed = serde_json::json!({
+        "model": "claude-sonnet-4-6",
+        "system": "You are Claude Code, Anthropic's official CLI.",
+        "messages": [
+            {"role": "user", "content": "Help me build a web server in Rust"},
+            {"role": "assistant", "content": "I'd be happy to help you build a web server in Rust."},
+            {"role": "user", "content": "Write integration tests"},
+            {"role": "assistant", "content": "Writing integration tests with reqwest."}
+        ]
+    });
+
+    let pre = parse_anthropic_request(&serde_json::to_vec(&body_original).unwrap()).unwrap();
+    let post = parse_anthropic_request(&serde_json::to_vec(&body_trimmed).unwrap()).unwrap();
+
+    let pre_identity = pre.thread_identity.expect("should have fallback identity");
+    let post_identity = post.thread_identity.expect("should have fallback identity");
+
+    // When the first user/assistant pair is preserved, identity should be stable.
+    assert_eq!(
+        pre_identity, post_identity,
+        "Identity should be stable when first user/assistant anchors are preserved.\n  \
+         Pre:  {pre_identity}\n  \
+         Post: {post_identity}"
+    );
+}
+
+#[test]
 fn test_system_fingerprint_unaffected_without_billing_header() {
     let body_a = serde_json::to_vec(&serde_json::json!({
         "model": "claude-opus-4-6-20250929",

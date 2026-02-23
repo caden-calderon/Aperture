@@ -186,3 +186,42 @@ fn test_is_api_endpoint() {
     assert!(!is_api_endpoint("/health"));
     assert!(!is_api_endpoint("/v1/models"));
 }
+
+/// H9 fix: `set_thread_identity()` overrides the captured exchange's identity
+/// so that ingest resolves the same session as the rewriter (PRE-REWRITE identity).
+#[test]
+fn test_set_thread_identity_overrides_captured_identity() {
+    let store = CaptureStore::default();
+
+    // Capture from a body that produces some fallback identity
+    let body = sample_anthropic_request();
+    let parsed = store.capture_request("req_1", "/v1/messages", &body);
+    assert!(parsed.is_some());
+
+    let original_identity = store
+        .get_exchange("req_1")
+        .unwrap()
+        .thread_identity
+        .clone();
+
+    // Override with a different (PRE-REWRITE) identity
+    store.set_thread_identity("req_1", Some("fallback:pre_rewrite_abc".to_string()));
+
+    let overridden = store.get_exchange("req_1").unwrap();
+    assert_eq!(
+        overridden.thread_identity.as_deref(),
+        Some("fallback:pre_rewrite_abc"),
+        "thread_identity should be overridden to PRE-REWRITE value"
+    );
+    assert_ne!(
+        overridden.thread_identity, original_identity,
+        "overridden identity should differ from the POST-REWRITE capture"
+    );
+}
+
+#[test]
+fn test_set_thread_identity_noop_for_missing_exchange() {
+    let store = CaptureStore::default();
+    // Should not panic on missing exchange
+    store.set_thread_identity("nonexistent", Some("test".to_string()));
+}

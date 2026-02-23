@@ -70,10 +70,11 @@ pub fn is_context_tool_name(name: &str) -> bool {
 /// Check whether a tool name is a proxy-injected (interceptor) context tool.
 ///
 /// Only matches bare names (`aperture_context_*`), NOT MCP-namespaced names.
-/// MCP tools (`mcp__aperture__aperture_context_*`) are managed by Claude Code
-/// and must remain in conversation history so the model remembers calling them.
+/// Intercepted tools are always stripped from ALL turns unconditionally.
 ///
-/// Use this for cleanup/stripping — only interceptor tools should be stripped.
+/// MCP context tools (`mcp__aperture__*`) are handled separately with
+/// turn-aware stripping in the cleanup functions — stale ones are stripped,
+/// recent ones (last assistant message) are preserved.
 pub fn is_intercepted_context_tool_name(name: &str) -> bool {
     name.starts_with(CONTEXT_TOOL_PREFIX) && !name.starts_with(MCP_CONTEXT_TOOL_PREFIX)
 }

@@ -76,6 +76,17 @@ impl CaptureStore {
         }
     }
 
+    /// Override the thread_identity for a captured exchange.
+    ///
+    /// Used to pass the PRE-REWRITE thread identity through to ingest,
+    /// preventing session divergence when archival changes the first
+    /// user/assistant anchors that `fallback_thread_identity()` hashes.
+    pub fn set_thread_identity(&self, request_id: &str, identity: Option<String>) {
+        if let Some(mut exchange) = self.exchanges.get_mut(request_id) {
+            exchange.thread_identity = identity;
+        }
+    }
+
     /// Capture and parse an incoming request.
     ///
     /// Returns the parsed request data (provider, blocks) for the handler to use.

@@ -1,7 +1,7 @@
 # diagnostics/ — Plan Layering Deep Dives
 
-Ten rounds of systematic debugging sessions investigating a critical bug in Aperture's
-metacognition system: **plan layering failure** (R9-1 / MT-1).
+Twelve rounds (and counting) of systematic debugging sessions investigating a critical bug
+in Aperture's metacognition system: **plan layering failure** (R9-1 / MT-1).
 
 ## The Problem
 
@@ -34,9 +34,15 @@ pending plan. See `src-tauri/src/engine/planner/mod.rs` and `src-tauri/src/metac
 | [08-investigation](round-08-investigation.md) | Deeper dive into candidate fixes |
 | [09](round-09.md) | Fix implementation and diagnostic tracing |
 | [10](round-10.md) | **Manual test — PASSED** (3 archive rounds, 2 successful cleans) |
+| [11](round-11.md) | **REGRESSION** — 3rd round fails (2 cleans work, 3rd never fires) |
+| [12](round-12.md) | **Confirmed regression** — same pattern (2 cleans, 3rd fails) |
 
-## Outcome
+## Current Status
 
-Round 10 verified the fix: 3 stacked archive rounds (8+8+5 = 21 blocks), 2 successful
-cleans, plan layering working correctly. Diagnostic `warn!()` traces added to confirm
-session ID alignment (H1 vs H2 root cause analysis pending log review).
+**Regression confirmed in R11 + R12.** Round 10 showed 3 rounds working (8+8+5 = 21 blocks).
+Rounds 11 and 12 both show the same failure: first 2 cleanup rounds fire correctly, 3rd
+committed plan never fires. The 3rd plan commits successfully (MCP returns success) but the
+archived block IDs never appear in persistent state.
+
+Diagnostic `warn!()` traces (R9-DIAG) are in place. Next step: analyze R11/R12 JSONL logs
+to identify why the 3rd commit fails to persist.

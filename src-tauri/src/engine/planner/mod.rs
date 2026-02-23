@@ -545,6 +545,11 @@ impl ContextPlanner {
         let mut persistent_archived =
             self.read_session_state(session_id, |state| state.persistent_archived_ids.clone());
 
+        // Track whether a new plan was consumed this turn (before we process it).
+        // Persistent re-application produces mutations every turn, but breadcrumbs
+        // should only fire when a new plan is actually being applied.
+        let had_pending_plan = input.pending_plan.is_some();
+
         // 1. Apply model's planned changes first (model intent takes priority)
         if let Some(ref plan) = input.pending_plan {
             warn!(
@@ -638,9 +643,14 @@ impl ContextPlanner {
             state.last_delta = new_delta.clone();
         });
 
-        // 6. Build cleanup instructions with breadcrumb from applied mutations
+        // 6. Build cleanup instructions with breadcrumb from applied mutations.
+        //
+        // Breadcrumb only fires when a NEW pending plan was consumed this turn.
+        // Persistent re-application produces mutations every turn (correct — the
+        // rewriter needs them), but those shouldn't generate breadcrumbs since the
+        // model already saw the confirmation when the plan was first applied.
         let budget_pct = input.budget.utilization;
-        let breadcrumb = if mutations.is_empty() {
+        let breadcrumb = if !had_pending_plan || mutations.is_empty() {
             None
         } else {
             let text = cleanup::generate_breadcrumb(&mutations, net_delta, budget_pct);
