@@ -242,6 +242,7 @@ Tauri/WebKit crashes. Updating Mesa drivers is the real fix (outside Aperture's 
 
 ## Remaining Work (Priority Order)
 
+### Completed
 1. ~~Implement R9-1 Option B fix~~ — **DONE**
 2. ~~Add diagnostic tracing~~ — **DONE**
 3. ~~Add MCP call_proxy retry~~ — **DONE**
@@ -254,9 +255,24 @@ Tauri/WebKit crashes. Updating Mesa drivers is the real fix (outside Aperture's 
 10. ~~Fix parallel MCP crash (quick fix)~~ — **DONE (ExitRequested handler, MT3 confirmed)**
 11. ~~Proxy decoupling~~ — **DONE (2026-02-24)** — Separate `aperture-proxy` process
 12. ~~File-edit crash~~ — **DONE (2026-02-24)** — Vite ignore patterns + session idle clearing
+
+### Active: Codebase Refactor (Multi-Session)
+**Plan**: `dev/phase-4/refactor-plan.md`
+
+**Phase A: Backend (Rust)** — IN PROGRESS
+- A.0: Exploration — file-by-file audit of every .rs file (NEXT)
+- A.1: Test extraction — inline tests → `tests/` directories (per-concern files, NOT mega tests.rs)
+- A.2: File splitting — oversized files into submodules
+- A.3: Module organization — group related files, fix misplacements
+- A.4: Code quality — dead code, patterns, comments, bugs
+
+**Phase B: Frontend (Svelte/TS)** — PENDING (after Phase A)
+**Phase C: Docs & Project Structure** — PENDING (after Phase B)
+
+### Backlog (Post-Refactor)
 13. **Block ID display aliases** — B1/B42 style aliases mapped to UUIDs
-13. **Fix breadcrumb delta bug** — low severity, delta shows +0 on re-archival
-14. **Fix budget % gap** — include overhead in engine budget calculation
+14. **Fix breadcrumb delta bug** — low severity, delta shows +0 on re-archival
+15. **Fix budget % gap** — include overhead in engine budget calculation
 15. **Fix D: Cache + Archival Death Spiral** — cache-aware archival strategy
 16. **P1: Economics Ledger** — token cost instrumentation
 17. **P3: Schema Overhead Reduction** — consolidate tools, lazy injection
