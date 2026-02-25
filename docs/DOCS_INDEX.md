@@ -1,6 +1,6 @@
 # Documentation Index
 
-Last updated: 2026-02-20
+Last updated: 2026-02-24
 
 This is the canonical navigation map for Aperture documentation.
 When in doubt, prefer `docs/` over `dev/` over `.context/`.

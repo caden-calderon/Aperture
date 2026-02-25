@@ -7,6 +7,7 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use super::provider::CompressionTarget;
 
@@ -85,14 +86,21 @@ impl CompressionQueue {
 
     /// Enqueue a new compression job.
     pub fn enqueue(&self, job: CompressionJob) {
-        let mut guard = self.pending.lock().expect("pending queue lock");
-        guard.push_back(job);
+        match self.pending.lock() {
+            Ok(mut guard) => guard.push_back(job),
+            Err(_) => warn!("pending queue lock poisoned in enqueue, dropping job"),
+        }
     }
 
     /// Dequeue the next pending job.
     pub fn dequeue(&self) -> Option<CompressionJob> {
-        let mut guard = self.pending.lock().expect("pending queue lock");
-        guard.pop_front()
+        match self.pending.lock() {
+            Ok(mut guard) => guard.pop_front(),
+            Err(_) => {
+                warn!("pending queue lock poisoned in dequeue, returning None");
+                None
+            }
+        }
     }
 
     /// Mark a job completed and store completion metadata.
@@ -100,10 +108,10 @@ impl CompressionQueue {
         job.status = CompressionJobStatus::Completed;
         job.output_tokens = Some(output_tokens);
         job.error = None;
-        self.completed
-            .lock()
-            .expect("completed queue lock")
-            .push_back(job);
+        match self.completed.lock() {
+            Ok(mut guard) => guard.push_back(job),
+            Err(_) => warn!("completed queue lock poisoned in mark_completed, dropping result"),
+        }
     }
 
     /// Mark a job failed and record error text.
@@ -111,23 +119,30 @@ impl CompressionQueue {
         job.status = CompressionJobStatus::Failed;
         job.output_tokens = None;
         job.error = Some(error.into());
-        self.completed
-            .lock()
-            .expect("completed queue lock")
-            .push_back(job);
+        match self.completed.lock() {
+            Ok(mut guard) => guard.push_back(job),
+            Err(_) => warn!("completed queue lock poisoned in mark_failed, dropping result"),
+        }
     }
 
     pub fn pending_len(&self) -> usize {
-        self.pending.lock().expect("pending queue lock").len()
+        match self.pending.lock() {
+            Ok(guard) => guard.len(),
+            Err(_) => {
+                warn!("pending queue lock poisoned in pending_len, returning 0");
+                0
+            }
+        }
     }
 
     pub fn completed_snapshot(&self) -> Vec<CompressionJob> {
-        self.completed
-            .lock()
-            .expect("completed queue lock")
-            .iter()
-            .cloned()
-            .collect()
+        match self.completed.lock() {
+            Ok(guard) => guard.iter().cloned().collect(),
+            Err(_) => {
+                warn!("completed queue lock poisoned in completed_snapshot, returning empty");
+                Vec::new()
+            }
+        }
     }
 }
 

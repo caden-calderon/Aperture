@@ -13,19 +13,27 @@
 
 use axum::{
     body::Body,
-    http::{Request, StatusCode},
-    response::{IntoResponse, Response},
+    http::{header, Method, Request, StatusCode},
+    response::{
+        sse::{Event as SseEvent, KeepAlive, Sse},
+        IntoResponse, Response,
+    },
     Json,
 };
 use serde_json::{json, Value};
+use std::convert::Infallible;
 use std::sync::Arc;
+use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::StreamExt;
 use tracing::{debug, warn};
 
 use super::ProxyState;
 use crate::engine::ContextEngine;
+use crate::events::types::ApertureEvent;
 use crate::metacog::{
     context_tools_passive_only, dispatch_tool_with_limits_for_session, ToolOutput, ToolOutputLimits,
 };
+
 
 const CONTEXT_API_BODY_LIMIT_BYTES: usize = 1024 * 64;
 
@@ -42,24 +50,51 @@ pub async fn handle_aperture_route(
         return None;
     }
 
+    // Handle CORS preflight for browser/webview access.
+    if req.method() == Method::OPTIONS {
+        return Some(cors_preflight_response());
+    }
+
     let sub_path = path.strip_prefix("/_aperture").unwrap_or("");
 
-    if sub_path == "/health" {
-        return Some(health_check().into_response());
-    }
+    let response = if sub_path == "/health" {
+        health_check().into_response()
+    } else if sub_path == "/events" {
+        sse_events(state).into_response()
+    } else if let Some(command) = sub_path.strip_prefix("/ipc/").filter(|c| !c.is_empty()) {
+        super::ipc_api::handle_ipc_command(state, command, req).await
+    } else if let Some(tool_name) = context_tool_name(sub_path) {
+        dispatch_context_tool(state, tool_name, req).await
+    } else {
+        json_error_response(StatusCode::NOT_FOUND, "unknown aperture route")
+    };
 
-    if let Some(tool_name) = context_tool_name(sub_path) {
-        return Some(dispatch_context_tool(state, tool_name, req).await);
-    }
-
-    Some(json_error_response(
-        StatusCode::NOT_FOUND,
-        "unknown aperture route",
-    ))
+    Some(with_cors_headers(response))
 }
 
 fn is_aperture_path(path: &str) -> bool {
     path.starts_with("/_aperture/") || path == "/_aperture"
+}
+
+/// CORS preflight response for `/_aperture/` endpoints.
+///
+/// The Tauri webview makes cross-origin requests from `tauri://localhost`
+/// or `http://localhost:1420` (Vite dev) to the proxy at `127.0.0.1:5400`.
+fn cors_preflight_response() -> Response {
+    let mut resp = StatusCode::NO_CONTENT.into_response();
+    let headers = resp.headers_mut();
+    headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*".parse().unwrap());
+    headers.insert(header::ACCESS_CONTROL_ALLOW_METHODS, "GET, POST, OPTIONS".parse().unwrap());
+    headers.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, "content-type".parse().unwrap());
+    headers.insert(header::ACCESS_CONTROL_MAX_AGE, "86400".parse().unwrap());
+    resp
+}
+
+/// Add CORS headers to an aperture API response.
+fn with_cors_headers(mut response: Response) -> Response {
+    let headers = response.headers_mut();
+    headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*".parse().unwrap());
+    response
 }
 
 fn context_tool_name(sub_path: &str) -> Option<&'static str> {
@@ -83,11 +118,37 @@ fn health_check() -> impl IntoResponse {
 }
 
 /// Dispatch a context tool via the engine, returning a JSON response.
+///
+/// Serialized by `aperture_semaphore` — only one `/_aperture/context/*`
+/// request runs at a time to prevent concurrent engine access crashes.
 async fn dispatch_context_tool(
     state: &Arc<ProxyState>,
     tool_name: &str,
     req: Request<Body>,
 ) -> Response {
+    // Serialize all context tool requests through a semaphore to prevent
+    // concurrent engine access that can crash the proxy (R14 bug).
+    let _permit = match tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        state.aperture_semaphore.acquire(),
+    )
+    .await
+    {
+        Ok(Ok(permit)) => permit,
+        Ok(Err(_)) => {
+            return json_error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "context engine semaphore closed",
+            )
+        }
+        Err(_) => {
+            return json_error_response(
+                StatusCode::GATEWAY_TIMEOUT,
+                "context tool request timed out waiting for engine",
+            )
+        }
+    };
+
     if context_tools_passive_only() {
         return context_tools_disabled_response(
             "Aperture context tools are disabled (passive-only mode). Set APERTURE_CONTEXT_TOOLS_MODE=enabled to re-enable.",
@@ -199,6 +260,42 @@ async fn dispatch_context_tool(
             "session_id": session_id
         })),
     )
+        .into_response()
+}
+
+/// SSE event stream endpoint.
+///
+/// Returns an infinite SSE stream of `ApertureEvent` JSON payloads.
+/// High-frequency `ResponseStreaming` events use a named `stream-progress` event type
+/// so clients can filter efficiently.
+fn sse_events(state: &Arc<ProxyState>) -> Response {
+    let broadcaster = match &state.broadcaster {
+        Some(b) => b.clone(),
+        None => {
+            return json_error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "SSE events not available (running inside Tauri — use Tauri event listeners instead)",
+            )
+        }
+    };
+
+    let rx = broadcaster.subscribe();
+    let stream = BroadcastStream::new(rx).filter_map(|result| match result {
+        Ok(event) => {
+            let json = serde_json::to_string(&event).ok()?;
+            let sse = match &event {
+                ApertureEvent::ResponseStreaming { .. } => {
+                    SseEvent::default().event("stream-progress").data(json)
+                }
+                _ => SseEvent::default().data(json),
+            };
+            Some(Ok::<_, Infallible>(sse))
+        }
+        Err(_) => None, // Lagged — skip missed events
+    });
+
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
         .into_response()
 }
 

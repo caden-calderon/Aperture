@@ -207,20 +207,22 @@ impl ContextEngine {
 
     /// Current sidekick compression settings.
     pub fn compression_settings(&self) -> CompressionSettings {
-        self.compression_settings
-            .lock()
-            .expect("compression_settings lock")
-            .clone()
+        match self.compression_settings.lock() {
+            Ok(guard) => guard.clone(),
+            Err(_) => {
+                warn!("compression_settings lock poisoned, returning default");
+                CompressionSettings::default()
+            }
+        }
     }
 
     /// Update sidekick compression settings.
     pub fn set_compression_settings(&self, settings: CompressionSettings) {
         let normalized = settings.normalized();
-        let mut guard = self
-            .compression_settings
-            .lock()
-            .expect("compression_settings lock");
-        *guard = normalized;
+        match self.compression_settings.lock() {
+            Ok(mut guard) => *guard = normalized,
+            Err(_) => warn!("compression_settings lock poisoned, cannot update settings"),
+        }
     }
 
     /// Version history for a block.

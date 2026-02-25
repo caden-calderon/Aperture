@@ -90,21 +90,22 @@ impl ContextPlanner {
 
     /// Get the effective budget ceiling (override or config default).
     pub fn effective_budget_ceiling(&self) -> f64 {
-        let guard = self
-            .budget_ceiling_override
-            .lock()
-            .expect("budget_ceiling lock");
-        guard.unwrap_or(self.config.budget_ceiling)
+        match self.budget_ceiling_override.lock() {
+            Ok(guard) => guard.unwrap_or(self.config.budget_ceiling),
+            Err(_) => {
+                warn!("budget_ceiling lock poisoned, returning config default");
+                self.config.budget_ceiling
+            }
+        }
     }
 
     /// Set a runtime override for the budget ceiling (from UI settings).
     pub fn set_budget_ceiling(&self, ceiling: f64) {
         let clamped = ceiling.clamp(0.40, 1.0);
-        let mut guard = self
-            .budget_ceiling_override
-            .lock()
-            .expect("budget_ceiling lock");
-        *guard = Some(clamped);
+        match self.budget_ceiling_override.lock() {
+            Ok(mut guard) => *guard = Some(clamped),
+            Err(_) => warn!("budget_ceiling lock poisoned, cannot set ceiling"),
+        }
     }
 
     fn with_session_state<R>(

@@ -225,3 +225,151 @@ async fn test_session_override_uses_requested_session_id() {
         .unwrap_or_default()
         .contains("1 blocks"));
 }
+
+// ── Concurrent MCP Request Tests (R14 crash fix) ──────────────────────
+
+/// Seed an engine with N blocks across a session so tools have data to query.
+fn seed_engine_with_blocks(engine: &crate::engine::ContextEngine, count: usize) {
+    let blocks: Vec<Block> = (0..count)
+        .map(|i| make_block(&format!("b{i}"), Role::User, &format!("Block {i} content with some searchable keywords like aperture context engine planner")))
+        .collect();
+    engine.ingest("anthropic", "claude-sonnet-4-6", "proxy", Some("stress-test"), blocks, vec![], 0);
+}
+
+/// Helper to build a search request with a query.
+fn make_search_request(query: &str) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri("/_aperture/context/search")
+        .header("content-type", "application/json")
+        .body(Body::from(format!(r#"{{"query": "{query}"}}"#)))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn test_concurrent_search_requests_serialized() {
+    let state = make_state_with_engine();
+    seed_engine_with_blocks(state.engine.as_ref().unwrap(), 50);
+
+    // Fire 5 parallel search requests — the exact pattern that crashed R14.
+    let mut handles = vec![];
+    for i in 0..5 {
+        let state = state.clone();
+        handles.push(tokio::spawn(async move {
+            let req = make_search_request(&format!("Block {i}"));
+            dispatch_context_tool(&state, "aperture_context_search", req).await
+        }));
+    }
+
+    let mut success_count = 0;
+    for handle in handles {
+        let resp = handle.await.expect("task should not panic");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 16384).await.unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert!(!json["is_error"].as_bool().unwrap_or(true));
+        success_count += 1;
+    }
+    assert_eq!(success_count, 5);
+}
+
+#[tokio::test]
+async fn test_concurrent_mixed_tool_requests() {
+    let state = make_state_with_engine();
+    seed_engine_with_blocks(state.engine.as_ref().unwrap(), 30);
+
+    // Fire preview + search + status + search + preview in parallel.
+    let tools: Vec<(&str, &str)> = vec![
+        ("aperture_context_preview", "{}"),
+        ("aperture_context_search", r#"{"query": "aperture"}"#),
+        ("aperture_context_status", "{}"),
+        ("aperture_context_search", r#"{"query": "planner"}"#),
+        ("aperture_context_preview", "{}"),
+    ];
+
+    let mut handles = vec![];
+    for (tool_name, body) in tools {
+        let state = state.clone();
+        let body = body.to_string();
+        let tool = tool_name.to_string();
+        handles.push(tokio::spawn(async move {
+            let req = Request::builder()
+                .method("POST")
+                .uri(format!("/_aperture/context/{}", tool.strip_prefix("aperture_context_").unwrap()))
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap();
+            dispatch_context_tool(&Arc::new((*state).clone()), &tool, req).await
+        }));
+    }
+
+    for handle in handles {
+        let resp = handle.await.expect("task should not panic");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 16384).await.unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert!(!json["is_error"].as_bool().unwrap_or(true), "tool returned error: {}", json["content"]);
+    }
+}
+
+#[tokio::test]
+async fn test_semaphore_serializes_requests() {
+    // Verify that the semaphore actually serializes — acquire it manually,
+    // then fire a request which must wait. Release, then it should complete.
+    let state = make_state_with_engine();
+    seed_engine_with_blocks(state.engine.as_ref().unwrap(), 5);
+
+    // Acquire the semaphore manually.
+    let permit = state.aperture_semaphore.acquire().await.unwrap();
+
+    // Fire a request that will block on the semaphore.
+    let state_clone = state.clone();
+    let handle = tokio::spawn(async move {
+        let req = make_empty_request();
+        dispatch_context_tool(&state_clone, "aperture_context_preview", req).await
+    });
+
+    // Give the spawned task time to start and block on semaphore.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(!handle.is_finished(), "request should be blocked by held semaphore");
+
+    // Release the semaphore — request should now complete.
+    drop(permit);
+
+    let resp = tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+        .await
+        .expect("should complete within timeout")
+        .expect("task should not panic");
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_concurrent_plan_stage_and_search() {
+    // Simulate the R14 scenario: plan operations + search running concurrently.
+    let state = make_state_with_engine();
+    seed_engine_with_blocks(state.engine.as_ref().unwrap(), 20);
+
+    let state1 = state.clone();
+    let handle_plan = tokio::spawn(async move {
+        let body = r#"{"control": {"op": "preview"}}"#;
+        let req = Request::builder()
+            .method("POST")
+            .uri("/_aperture/context/plan")
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        dispatch_context_tool(&state1, "aperture_context_plan", req).await
+    });
+
+    let state2 = state.clone();
+    let handle_search = tokio::spawn(async move {
+        let req = make_search_request("engine");
+        dispatch_context_tool(&state2, "aperture_context_search", req).await
+    });
+
+    let resp_plan = handle_plan.await.expect("plan task should not panic");
+    let resp_search = handle_search.await.expect("search task should not panic");
+
+    assert_eq!(resp_plan.status(), StatusCode::OK);
+    assert_eq!(resp_search.status(), StatusCode::OK);
+}

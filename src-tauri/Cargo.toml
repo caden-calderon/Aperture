@@ -29,7 +29,7 @@ tower = "0.5"
 tower-http = { version = "0.6", features = ["cors"] }
 bytes = "1"
 futures-util = "0.3"
-tokio-stream = "0.1"
+tokio-stream = { version = "0.1", features = ["sync"] }
 
 # Error handling
 thiserror = "2"
@@ -62,9 +62,17 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Environment
 dotenvy = "0.15"
 
+# Unix process management (setsid for detached proxy spawning)
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [[bin]]
 name = "aperture-mcp"
 path = "src/bin/aperture_mcp.rs"
+
+[[bin]]
+name = "aperture-proxy"
+path = "src/bin/aperture_proxy.rs"
 
 [dev-dependencies]
 tokio-test = "0.4"

@@ -24,7 +24,7 @@ import {
 import { editHistoryStore } from "./editHistory.svelte";
 import { zonesStore } from "./zones.svelte";
 import { uiStore } from "./ui.svelte";
-import { invoke } from "@tauri-apps/api/core";
+import { invokeProxy } from "../api";
 import {
   type ContextMutationMode,
 } from "../utils/providerAdapters";
@@ -316,7 +316,7 @@ async function invokePolicyDecision(
   payload: Record<string, unknown>
 ): Promise<EnginePolicyResult | null> {
   try {
-    const result = await invoke<unknown>(command, payload);
+    const result = await invokeProxy<unknown>(command, payload);
     return parsePolicyDecision(result);
   } catch {
     // Outside Tauri (web tests/dev), treat as no policy signal.
@@ -589,12 +589,12 @@ async function updateBlockContent(blockId: string, content: string): Promise<Mut
 
   // All supported transport paths are proxy-mutable, so content edits always
   // queue a persistent hot patch for upstream rewrite on subsequent requests.
-  invoke("queue_hot_patch", {
+  invokeProxy("queue_hot_patch", {
     role: block.role,
     originalContent: oldContent,
     newContent: content,
   }).catch(() => {
-    // Ignore errors when running outside Tauri (e.g., browser dev)
+    // Ignore errors when proxy is not reachable
   });
   rememberLocalHotPatch(block.role, oldContent, content);
 
@@ -914,14 +914,14 @@ async function setBudgetCeiling(ceiling: number): Promise<void> {
     localStorage.setItem(BUDGET_CEILING_KEY, clamped.toString());
   } catch { /* ignore */ }
   try {
-    await invoke("engine_set_budget_ceiling", { ceiling: clamped });
+    await invokeProxy("engine_set_budget_ceiling", { ceiling: clamped });
   } catch { /* engine may not be available */ }
 }
 
 /** Refresh compression settings from engine state (best-effort outside Tauri). */
 async function refreshCompressionSettings(): Promise<void> {
   try {
-    const settings = await invoke<Partial<CompressionSettings>>("engine_get_compression_settings");
+    const settings = await invokeProxy<Partial<CompressionSettings>>("engine_get_compression_settings");
     compressionSettings = normalizeCompressionSettings(settings);
   } catch {
     // Ignore when engine is unavailable (web tests/dev).
@@ -933,7 +933,7 @@ async function setCompressionSettings(settings: CompressionSettings): Promise<vo
   const normalized = normalizeCompressionSettings(settings);
   compressionSettings = normalized;
   try {
-    await invoke("engine_update_compression_settings", { settings: normalized });
+    await invokeProxy("engine_update_compression_settings", { settings: normalized });
   } catch {
     // Keep local state even if backend is unavailable.
   }

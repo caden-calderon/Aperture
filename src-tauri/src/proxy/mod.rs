@@ -11,6 +11,7 @@ pub mod error;
 pub mod handler;
 pub mod hot_patch;
 pub mod interceptor;
+pub mod ipc_api;
 pub mod parser;
 pub mod provider_adapter;
 pub mod rewriter;
@@ -21,6 +22,7 @@ use reqwest::Client;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
+use tokio::sync::Semaphore;
 use tracing::info;
 
 use self::capture::CaptureStore;
@@ -28,6 +30,7 @@ use self::error::ProxyError;
 use self::hot_patch::HotPatchQueue;
 use self::runaway_guard::RunawayGuard;
 use crate::engine::ContextEngine;
+use crate::events::broadcaster::BroadcastDispatcher;
 use crate::events::dispatcher::DynDispatcher;
 
 /// Default port for the proxy server.
@@ -75,6 +78,11 @@ pub struct ProxyState {
     pub engine: Option<Arc<ContextEngine>>,
     /// Runaway-request detector for advisory warnings and compact fallback mode.
     pub runaway_guard: Arc<RunawayGuard>,
+    /// Serializes `/_aperture/context/*` requests to prevent concurrent engine access.
+    pub aperture_semaphore: Arc<Semaphore>,
+    /// Broadcast dispatcher for SSE event streams (standalone proxy mode).
+    /// `None` when running inside Tauri (events go through AppHandle instead).
+    pub broadcaster: Option<Arc<BroadcastDispatcher>>,
 }
 
 impl ProxyState {
@@ -114,6 +122,8 @@ impl ProxyState {
             hot_patches: Arc::new(HotPatchQueue::new()),
             engine: None,
             runaway_guard: Arc::new(RunawayGuard::new()),
+            aperture_semaphore: Arc::new(Semaphore::new(1)),
+            broadcaster: None,
         })
     }
 
@@ -130,6 +140,7 @@ pub async fn start_proxy(
     dispatcher: Option<DynDispatcher>,
     hot_patches: Option<Arc<HotPatchQueue>>,
     engine: Option<Arc<ContextEngine>>,
+    broadcaster: Option<Arc<BroadcastDispatcher>>,
 ) -> Result<(), ProxyError> {
     let mut state = ProxyState::new()?;
     if let Some(d) = dispatcher {
@@ -139,6 +150,7 @@ pub async fn start_proxy(
         state.hot_patches = hp;
     }
     state.engine = engine;
+    state.broadcaster = broadcaster;
     let state = Arc::new(state);
 
     let app = Router::new()

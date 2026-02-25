@@ -6,6 +6,7 @@
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 /// Maximum number of action records to retain.
 const MAX_RECORDS: usize = 500;
@@ -102,7 +103,13 @@ impl ActionLog {
 
     /// Record an action.
     pub fn record(&self, record: ActionRecord) {
-        let mut records = self.records.lock().expect("action_log lock poisoned");
+        let mut records = match self.records.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                warn!("action_log lock poisoned in record, dropping action");
+                return;
+            }
+        };
         records.push(record);
 
         // Evict oldest if over limit
@@ -114,56 +121,77 @@ impl ActionLog {
 
     /// Get all records (oldest first).
     pub fn all(&self) -> Vec<ActionRecord> {
-        self.records
-            .lock()
-            .expect("action_log lock poisoned")
-            .clone()
+        match self.records.lock() {
+            Ok(guard) => guard.clone(),
+            Err(_) => {
+                warn!("action_log lock poisoned in all, returning empty");
+                Vec::new()
+            }
+        }
     }
 
     /// Get the N most recent records.
     pub fn recent(&self, n: usize) -> Vec<ActionRecord> {
-        let records = self.records.lock().expect("action_log lock poisoned");
-        let start = records.len().saturating_sub(n);
-        records[start..].to_vec()
+        match self.records.lock() {
+            Ok(records) => {
+                let start = records.len().saturating_sub(n);
+                records[start..].to_vec()
+            }
+            Err(_) => {
+                warn!("action_log lock poisoned in recent, returning empty");
+                Vec::new()
+            }
+        }
     }
 
     /// Get a specific record by ID.
     pub fn get(&self, id: &str) -> Option<ActionRecord> {
-        self.records
-            .lock()
-            .expect("action_log lock poisoned")
-            .iter()
-            .find(|r| r.id == id)
-            .cloned()
+        match self.records.lock() {
+            Ok(guard) => guard.iter().find(|r| r.id == id).cloned(),
+            Err(_) => {
+                warn!("action_log lock poisoned in get, returning None");
+                None
+            }
+        }
     }
 
     /// Get the most recent undoable action for a block.
     pub fn last_undoable_for(&self, block_id: &str) -> Option<ActionRecord> {
-        self.records
-            .lock()
-            .expect("action_log lock poisoned")
-            .iter()
-            .rev()
-            .find(|r| {
-                r.undoable
-                    && r.undo_data.is_some()
-                    && r.result == ActionResult::Success
-                    && r.target_block_ids.contains(&block_id.to_string())
-            })
-            .cloned()
+        match self.records.lock() {
+            Ok(guard) => guard
+                .iter()
+                .rev()
+                .find(|r| {
+                    r.undoable
+                        && r.undo_data.is_some()
+                        && r.result == ActionResult::Success
+                        && r.target_block_ids.contains(&block_id.to_string())
+                })
+                .cloned(),
+            Err(_) => {
+                warn!("action_log lock poisoned in last_undoable_for, returning None");
+                None
+            }
+        }
     }
 
     /// Total number of recorded actions.
     pub fn count(&self) -> usize {
-        self.records.lock().expect("action_log lock poisoned").len()
+        match self.records.lock() {
+            Ok(guard) => guard.len(),
+            Err(_) => {
+                warn!("action_log lock poisoned in count, returning 0");
+                0
+            }
+        }
     }
 
     /// Clear all records.
     pub fn clear(&self) {
-        self.records
-            .lock()
-            .expect("action_log lock poisoned")
-            .clear();
+        match self.records.lock() {
+            Ok(mut guard) => guard.clear(),
+            Err(_) => warn!("action_log lock poisoned in clear, skipping"),
+        }
     }
 }
 

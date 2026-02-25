@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
+  import { invokeProxy } from "$lib/api";
   import { TokenBudgetBar, Zone, Modal, Toast, CommandPalette, ThemeToggle, DensityControl, TitleBar, ThemeCustomizer, BlockTypeManager, ZoneManager, SearchBar, TerminalPanel, ContextMenu, ZoneMinimap, ContextDiff } from "$lib/components";
   import { contextStore, selectionStore, uiStore, themeStore, blockTypesStore, zonesStore, searchStore, terminalStore, editHistoryStore, connectionStore } from "$lib/stores";
   import { createResizable, createBlockHandlers, createModalHandlers, createKeyboardHandlers, createCommandHandlers } from "$lib/composables";
@@ -68,10 +69,10 @@
 
   async function refreshEngineState(): Promise<void> {
     const [rustBlocks, budget, sessions, active] = await Promise.all([
-      invoke<RustBlock[]>("engine_get_blocks"),
-      invoke<{ limit_tokens: number }>("engine_get_budget_status"),
-      invoke<EngineSessionInfo[]>("engine_get_sessions"),
-      invoke<EngineSessionInfo | null>("engine_get_active_session"),
+      invokeProxy<RustBlock[]>("engine_get_blocks"),
+      invokeProxy<{ limit_tokens: number }>("engine_get_budget_status"),
+      invokeProxy<EngineSessionInfo[]>("engine_get_sessions"),
+      invokeProxy<EngineSessionInfo | null>("engine_get_active_session"),
     ]);
 
     activeEngineSessionId = active?.id ?? null;
@@ -91,7 +92,7 @@
 
     switchingSession = true;
     try {
-      const switched = await invoke<boolean>("engine_switch_session", { sessionId: nextSessionId });
+      const switched = await invokeProxy<boolean>("engine_switch_session", { sessionId: nextSessionId });
       if (!switched) {
         uiStore.showToast("Could not switch session", "warning");
         return;
@@ -139,9 +140,8 @@
       activeEngineSessionId = null;
     });
     connectionStore.connect();
-    void refreshEngineState().catch(() => {
-      // Not in Tauri or engine unavailable — ignore
-    });
+    // Don't eagerly fetch engine blocks — start with a clean slate.
+    // Blocks populate on first context_updated event (new traffic).
 
     // Flush debounced localStorage writes + cleanup terminal on window close
     const handleBeforeUnload = () => {

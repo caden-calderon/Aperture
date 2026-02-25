@@ -7,6 +7,7 @@ use std::sync::Mutex;
 
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 /// A single tool session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,6 +113,17 @@ impl SessionStore {
         }
     }
 
+    /// Lock active_id gracefully, returning None if the mutex is poisoned.
+    fn lock_active_id(&self) -> Option<std::sync::MutexGuard<'_, Option<String>>> {
+        match self.active_id.lock() {
+            Ok(guard) => Some(guard),
+            Err(_) => {
+                warn!("active_id lock poisoned, returning None");
+                None
+            }
+        }
+    }
+
     /// Create a new session and set it as active.
     ///
     /// Guard: if an active session exists with significant content (>1000 tokens),
@@ -155,7 +167,9 @@ impl SessionStore {
         };
 
         if should_activate {
-            *self.active_id.lock().expect("active_id lock poisoned") = Some(id.clone());
+            if let Some(mut guard) = self.lock_active_id() {
+                *guard = Some(id.clone());
+            }
         }
         id
     }
@@ -167,24 +181,23 @@ impl SessionStore {
 
     /// Get the currently active session.
     pub fn active(&self) -> Option<Session> {
-        let active_id = self.active_id.lock().expect("active_id lock poisoned");
-        active_id
+        let guard = self.lock_active_id()?;
+        guard
             .as_ref()
             .and_then(|id| self.sessions.get(id).map(|r| r.value().clone()))
     }
 
     /// Get the active session ID.
     pub fn active_id(&self) -> Option<String> {
-        self.active_id
-            .lock()
-            .expect("active_id lock poisoned")
-            .clone()
+        self.lock_active_id()?.clone()
     }
 
     /// Switch to a different session.
     pub fn switch_to(&self, id: &str) -> bool {
         if self.sessions.contains_key(id) {
-            *self.active_id.lock().expect("active_id lock poisoned") = Some(id.to_string());
+            if let Some(mut guard) = self.lock_active_id() {
+                *guard = Some(id.to_string());
+            }
             true
         } else {
             false
@@ -211,9 +224,10 @@ impl SessionStore {
         let removed = self.sessions.remove(id).map(|(_, s)| s);
         // If we removed the active session, clear active_id
         if let Some(ref session) = removed {
-            let mut active = self.active_id.lock().expect("active_id lock poisoned");
-            if active.as_deref() == Some(&session.id) {
-                *active = None;
+            if let Some(mut active) = self.lock_active_id() {
+                if active.as_deref() == Some(&session.id) {
+                    *active = None;
+                }
             }
         }
         removed
@@ -227,7 +241,9 @@ impl SessionStore {
     /// Clear all sessions.
     pub fn clear(&self) {
         self.sessions.clear();
-        *self.active_id.lock().expect("active_id lock poisoned") = None;
+        if let Some(mut guard) = self.lock_active_id() {
+            *guard = None;
+        }
     }
 }
 

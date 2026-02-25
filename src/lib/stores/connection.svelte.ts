@@ -2,13 +2,15 @@
  * Connection Store
  * Manages proxy connection state and live event subscription.
  *
- * The proxy is embedded in the Tauri app and always running.
- * "Connected" means the proxy is ready. Activity tracking shows
+ * The proxy runs as a standalone process (aperture-proxy) on port 5400.
+ * "Connected" means the proxy is reachable. Activity tracking shows
  * whether a client (Claude Code, Codex) is actively sending requests.
+ *
+ * Events arrive via SSE from GET /_aperture/events.
+ * Terminal commands stay as Tauri IPC (PTY is process-local).
  */
 
-import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { invokeProxy, isProxyHealthy, getProxyUrl, getEventsUrl } from "../api";
 import type { BlocksCapturedPayload } from "../utils/blockConvert";
 
 // ============================================================================
@@ -38,7 +40,7 @@ export interface ProviderUsageSnapshot {
 // ============================================================================
 
 let status = $state<ConnectionStatus>("disconnected");
-let proxyAddress = $state("http://127.0.0.1:5400");
+let proxyAddress = $state(getProxyUrl());
 let activeProvider = $state<ProxyProvider>("unknown");
 let activeModel = $state<string | null>(null);
 let streaming = $state<StreamingState | null>(null);
@@ -49,18 +51,18 @@ let lastProviderUsage = $state<ProviderUsageSnapshot | null>(null);
 let lastActivityTime = $state<number>(0);
 let hasCapturedTraffic = $state(false);
 
-/** Seconds of inactivity before transitioning from "active" → "connected" (idle). */
+/** Seconds of inactivity before transitioning from "active" → idle and clearing blocks. */
 const IDLE_TIMEOUT_MS = 15_000;
 
-// Event listener handles for cleanup
-let unlistenFns: UnlistenFn[] = [];
+// SSE event source and cleanup handles
+let eventSource: EventSource | null = null;
 let healthCheckInterval: ReturnType<typeof setInterval> | undefined;
 let idleCheckInterval: ReturnType<typeof setInterval> | undefined;
 
 // Callback for when the engine has finished processing (context_updated event)
 let onContextUpdatedCb: (() => void) | null = null;
 // Callback for session reset (when client disconnects and a new session starts)
-let onSessionReset: (() => void) | null = null;
+let onSessionResetCb: (() => void) | null = null;
 
 // ============================================================================
 // Activity tracking
@@ -83,6 +85,11 @@ function checkIdle(): void {
     status = hasCapturedTraffic ? "connected" : "disconnected";
     activeModel = null;
     activeProvider = "unknown";
+
+    // Clear blocks when going idle — client likely exited
+    if (onSessionResetCb) {
+      onSessionResetCb();
+    }
   }
 }
 
@@ -91,34 +98,32 @@ function checkIdle(): void {
 // ============================================================================
 
 async function connect(): Promise<void> {
-  if (unlistenFns.length > 0 || idleCheckInterval || healthCheckInterval) {
+  if (eventSource || idleCheckInterval || healthCheckInterval) {
     disconnect();
   }
 
   status = "connecting";
   lastError = null;
+  proxyAddress = getProxyUrl();
 
   try {
-    // Get proxy address from backend
-    proxyAddress = await invoke<string>("get_proxy_address");
-
-    // Check if proxy is running
-    const running = await invoke<boolean>("is_proxy_running");
-    if (!running) {
+    // Check if proxy is running via health endpoint
+    const healthy = await isProxyHealthy();
+    if (!healthy) {
       status = "error";
       lastError = "Proxy is not running";
       return;
     }
 
-    // Subscribe to Tauri events
-    await subscribeToEvents();
+    // Subscribe to SSE events from the proxy
+    subscribeToEvents();
 
     // Start idle check polling (checks every 3s if we should go idle)
     startIdleCheck();
     startHealthCheck();
     await refreshHotPatchCount();
 
-    // Proxy process is up, but we only show connected/idle after traffic is observed.
+    // Proxy is up, but only show connected/idle after traffic is observed.
     status = "disconnected";
   } catch (e) {
     status = "error";
@@ -127,11 +132,11 @@ async function connect(): Promise<void> {
 }
 
 function disconnect(): void {
-  // Clean up event listeners
-  for (const unlisten of unlistenFns) {
-    unlisten();
+  // Close SSE connection
+  if (eventSource) {
+    eventSource.close();
+    eventSource = null;
   }
-  unlistenFns = [];
 
   // Stop checks
   if (healthCheckInterval) {
@@ -157,103 +162,127 @@ function clearSession(): void {
   hasCapturedTraffic = false;
   pendingHotPatches = 0;
   status = "disconnected";
-  invoke("clear_hot_patches").catch(() => {
-    // Ignore when not running in Tauri
+  invokeProxy("clear_hot_patches").catch(() => {
+    // Ignore when proxy is not reachable
   });
-  if (onSessionReset) {
-    onSessionReset();
+  if (onSessionResetCb) {
+    onSessionResetCb();
   }
 }
 
-async function subscribeToEvents(): Promise<void> {
-  // Main event channel
-  const unlistenMain = await listen<Record<string, unknown>>("aperture:events", (event) => {
-    const payload = event.payload;
-    const eventType = payload.type as string;
+function subscribeToEvents(): void {
+  const url = getEventsUrl();
+  eventSource = new EventSource(url);
 
-    switch (eventType) {
-      case "request_captured":
-        totalRequestsCaptured++;
-        activeProvider = (payload.provider as ProxyProvider) ?? "unknown";
-        markActive();
-        // Refresh hot patch count — patches may have been applied
-        refreshHotPatchCount();
-        break;
+  // Default (unnamed) events — main channel
+  eventSource.onmessage = (event) => {
+    handleEvent(event.data);
+  };
 
-      case "blocks_captured": {
-        const data = payload as unknown as BlocksCapturedPayload;
-        activeModel = data.model;
-        activeProvider = (data.provider as ProxyProvider) ?? "unknown";
-        if (data.input_tokens !== null || data.output_tokens !== null) {
-          const inputTokens = data.input_tokens;
-          const outputTokens = data.output_tokens;
-          lastProviderUsage = {
-            requestId: data.request_id,
-            inputTokens,
-            outputTokens,
-            totalTokens: (inputTokens ?? 0) + (outputTokens ?? 0),
-            observedAt: Date.now(),
-          };
-        }
-        markActive();
-        break;
-      }
-
-      case "context_updated": {
-        markActive();
-        if (onContextUpdatedCb) onContextUpdatedCb();
-        break;
-      }
-
-      case "response_complete":
-        if (typeof payload.tokens_used === "number") {
-          const requestId = typeof payload.request_id === "string" ? payload.request_id : "unknown";
-          const previous =
-            lastProviderUsage && lastProviderUsage.requestId === requestId
-              ? lastProviderUsage
-              : null;
-          lastProviderUsage = {
-            requestId,
-            inputTokens: previous?.inputTokens ?? null,
-            outputTokens: previous?.outputTokens ?? null,
-            totalTokens: payload.tokens_used,
-            observedAt: Date.now(),
-          };
-        }
-        streaming = null;
-        markActive();
-        break;
-
-      case "proxy_error":
-        lastError = (payload.message as string) ?? "Unknown proxy error";
-        break;
-    }
+  // Named "stream-progress" events — high frequency
+  eventSource.addEventListener("stream-progress", (event) => {
+    handleStreamProgress((event as MessageEvent).data);
   });
-  unlistenFns.push(unlistenMain);
 
-  // Streaming progress channel (high frequency, separate)
-  const unlistenStream = await listen<Record<string, unknown>>(
-    "aperture:stream-progress",
-    (event) => {
-      const payload = event.payload;
-      if (payload.type === "response_streaming") {
-        streaming = {
-          requestId: payload.request_id as string,
-          bytesReceived: payload.bytes_received as number,
-          provider: activeProvider,
-        };
-        markActive();
-      }
+  eventSource.onerror = () => {
+    // EventSource auto-reconnects, but mark error state temporarily
+    if (status !== "error") {
+      lastError = "SSE connection interrupted (reconnecting...)";
     }
-  );
-  unlistenFns.push(unlistenStream);
+  };
+}
+
+function handleEvent(data: string): void {
+  let payload: Record<string, unknown>;
+  try {
+    payload = JSON.parse(data);
+  } catch {
+    return;
+  }
+
+  const eventType = payload.type as string;
+
+  switch (eventType) {
+    case "request_captured":
+      totalRequestsCaptured++;
+      activeProvider = (payload.provider as ProxyProvider) ?? "unknown";
+      markActive();
+      refreshHotPatchCount();
+      break;
+
+    case "blocks_captured": {
+      const capturedData = payload as unknown as BlocksCapturedPayload;
+      activeModel = capturedData.model;
+      activeProvider = (capturedData.provider as ProxyProvider) ?? "unknown";
+      if (capturedData.input_tokens !== null || capturedData.output_tokens !== null) {
+        const inputTokens = capturedData.input_tokens;
+        const outputTokens = capturedData.output_tokens;
+        lastProviderUsage = {
+          requestId: capturedData.request_id,
+          inputTokens,
+          outputTokens,
+          totalTokens: (inputTokens ?? 0) + (outputTokens ?? 0),
+          observedAt: Date.now(),
+        };
+      }
+      markActive();
+      break;
+    }
+
+    case "context_updated": {
+      markActive();
+      if (onContextUpdatedCb) onContextUpdatedCb();
+      break;
+    }
+
+    case "response_complete":
+      if (typeof payload.tokens_used === "number") {
+        const requestId = typeof payload.request_id === "string" ? payload.request_id : "unknown";
+        const previous =
+          lastProviderUsage && lastProviderUsage.requestId === requestId
+            ? lastProviderUsage
+            : null;
+        lastProviderUsage = {
+          requestId,
+          inputTokens: previous?.inputTokens ?? null,
+          outputTokens: previous?.outputTokens ?? null,
+          totalTokens: payload.tokens_used as number,
+          observedAt: Date.now(),
+        };
+      }
+      streaming = null;
+      markActive();
+      break;
+
+    case "proxy_error":
+      lastError = (payload.message as string) ?? "Unknown proxy error";
+      break;
+  }
+}
+
+function handleStreamProgress(data: string): void {
+  let payload: Record<string, unknown>;
+  try {
+    payload = JSON.parse(data);
+  } catch {
+    return;
+  }
+
+  if (payload.type === "response_streaming") {
+    streaming = {
+      requestId: payload.request_id as string,
+      bytesReceived: payload.bytes_received as number,
+      provider: activeProvider,
+    };
+    markActive();
+  }
 }
 
 async function refreshHotPatchCount(): Promise<void> {
   try {
-    pendingHotPatches = await invoke<number>("pending_hot_patch_count");
+    pendingHotPatches = await invokeProxy<number>("pending_hot_patch_count");
   } catch {
-    // Not running in Tauri
+    // Proxy not reachable
   }
 }
 
@@ -266,8 +295,8 @@ function startIdleCheck(): void {
 
 async function checkHealth(): Promise<void> {
   try {
-    const running = await invoke<boolean>("is_proxy_running");
-    if (!running) {
+    const healthy = await isProxyHealthy();
+    if (!healthy) {
       status = "error";
       lastError = "Proxy is not running";
       streaming = null;
@@ -347,6 +376,6 @@ export const connectionStore = {
 
   /** Register a callback for when a session is cleared/reset. */
   onSessionReset(cb: () => void): void {
-    onSessionReset = cb;
+    onSessionResetCb = cb;
   },
 };

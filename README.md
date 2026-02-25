@@ -2,7 +2,7 @@
 
 > Universal LLM context visualization, management, and control proxy.
 
-**Status:** Beta — Phase 4 (Token Economics). Core proxy, context engine, and MCP tools working. 696 tests passing.
+**Status:** Active Beta — Phase 4 (Token Economics). Core proxy, context engine, and MCP tools working reliably. 720 tests passing.
 
 ## The Problem
 

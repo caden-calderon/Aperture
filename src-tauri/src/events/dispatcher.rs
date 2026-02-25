@@ -110,6 +110,16 @@ impl DynDispatcher {
         }
     }
 
+    /// Create from an arbitrary closure (used by `BroadcastDispatcher`).
+    pub fn from_fn<F>(f: F) -> Self
+    where
+        F: Fn(&ApertureEvent) + Send + Sync + 'static,
+    {
+        Self {
+            emit_fn: std::sync::Arc::new(f),
+        }
+    }
+
     /// Emit an event.
     pub fn emit(&self, event: &ApertureEvent) {
         (self.emit_fn)(event);

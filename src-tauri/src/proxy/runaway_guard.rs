@@ -6,6 +6,7 @@
 use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+use tracing::warn;
 
 const PROXY_WINDOW: Duration = Duration::from_secs(120);
 const CONTEXT_WINDOW: Duration = Duration::from_secs(60);
@@ -54,7 +55,13 @@ impl RunawayGuard {
 
     pub fn record_proxy_request(&self, body_bytes: usize) -> Option<RunawayAlert> {
         let now = Instant::now();
-        let mut state = self.state.lock().expect("runaway guard poisoned");
+        let mut state = match self.state.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                warn!("runaway guard lock poisoned in record_proxy_request, skipping");
+                return None;
+            }
+        };
 
         state.proxy_requests.push_back(ProxySample {
             at: now,
@@ -91,7 +98,13 @@ impl RunawayGuard {
 
     pub fn record_context_tool_call(&self) -> Option<RunawayAlert> {
         let now = Instant::now();
-        let mut state = self.state.lock().expect("runaway guard poisoned");
+        let mut state = match self.state.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                warn!("runaway guard lock poisoned in record_context_tool_call, skipping");
+                return None;
+            }
+        };
 
         state.context_tool_calls.push_back(now);
         prune_instant_window(&mut state.context_tool_calls, now, CONTEXT_WINDOW);
@@ -123,7 +136,13 @@ impl RunawayGuard {
     /// Remaining duration of an active context-tools circuit breaker.
     pub fn context_circuit_remaining(&self) -> Option<Duration> {
         let now = Instant::now();
-        let mut state = self.state.lock().expect("runaway guard poisoned");
+        let mut state = match self.state.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                warn!("runaway guard lock poisoned in context_circuit_remaining, skipping");
+                return None;
+            }
+        };
         let until = state.context_circuit_open_until?;
         if now >= until {
             state.context_circuit_open_until = None;

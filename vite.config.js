@@ -49,8 +49,18 @@ export default defineConfig(async () => ({
         }
       : undefined,
     watch: {
-      // 3. tell Vite to ignore watching `src-tauri`
-      ignored: ["**/src-tauri/**"],
+      // 3. Ignore non-source directories to prevent Vite reloads on file edits.
+      // Tailwind v4's oxide scanner puts .md files into the module graph via
+      // addWatchFile(), so any markdown edit triggers a full-page reload.
+      ignored: [
+        "**/src-tauri/**",
+        "**/*.md",
+        "**/dev/**",
+        "**/docs/**",
+        "**/.claude/**",
+        "**/.context/**",
+        "**/target/**",
+      ],
     },
   },
 }));

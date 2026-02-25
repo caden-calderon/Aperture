@@ -160,7 +160,14 @@ fn handle_streaming_response(
 
         // Finalize capture and dispatch events
         if let Some(exchange) = state.capture.finalize_streaming(&request_id) {
-            finalize_exchange(&state, &request_id, status.as_u16(), &exchange);
+            warn!(
+                request_id = %request_id,
+                bytes = total_bytes,
+                chunks = chunk_count,
+                "DIAG: SSE stream complete, starting finalize_exchange"
+            );
+
+            finalize_exchange(&state, &request_id, status.as_u16(), &exchange).await;
 
             debug!(
                 request_id = %request_id,
@@ -249,7 +256,7 @@ async fn handle_non_streaming_response(
                                 .capture
                                 .capture_response(request_id, status.as_u16(), &body)
                         {
-                            finalize_exchange(state, request_id, status.as_u16(), &exchange);
+                            finalize_exchange(state, request_id, status.as_u16(), &exchange).await;
                         }
                     }
 
@@ -274,7 +281,7 @@ async fn handle_non_streaming_response(
                 .capture
                 .capture_response(request_id, status.as_u16(), &response_bytes)
         {
-            finalize_exchange(state, request_id, status.as_u16(), &exchange);
+            finalize_exchange(state, request_id, status.as_u16(), &exchange).await;
         }
     }
 
