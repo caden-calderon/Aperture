@@ -1,4 +1,8 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("$lib/api", () => ({
+  invokeProxy: vi.fn().mockResolvedValue(null),
+}));
 
 import { contextStore } from "./context.svelte";
 import type { Block } from "../types";

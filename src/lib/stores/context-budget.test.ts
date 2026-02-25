@@ -4,6 +4,11 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("$lib/api", () => ({
+  invokeProxy: vi.fn().mockResolvedValue(null),
+}));
+
 import { contextStore } from "./context.svelte";
 import { uiStore } from "./ui.svelte";
 import type { Block } from "../types";
