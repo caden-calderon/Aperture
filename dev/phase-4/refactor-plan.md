@@ -5,6 +5,15 @@ Zero regressions. Every file audited. No stone left unturned.
 
 **Approach**: Explore first, execute later. Build complete knowledge before making changes.
 
+**Philosophy**: Line counts are guidelines for flagging, not mandates for splitting.
+A 70-line function that does one coherent thing clearly is better than 3 awkward helpers
+that fragment the logic. A 500-line file where everything is genuinely cohesive stays as-is.
+The question is always: "Does splitting this actually make it easier to understand, maintain,
+and work with — or does it just make the number smaller?" If the answer is the latter, leave it.
+We strive for FAANG-level quality but do not over-engineer. Unnecessary abstractions,
+helper functions that exist only to shrink a parent, and indirection for indirection's sake
+are worse than a slightly larger function or file.
+
 ---
 
 ## Phase A: Backend (Rust) — `src-tauri/src/`
@@ -12,13 +21,14 @@ Zero regressions. Every file audited. No stone left unturned.
 ### A.0: Exploration (Sessions 1-N)
 Go file-by-file through every `.rs` file. For each file, document:
 - **Purpose**: What does this file do? What module does it belong to?
-- **Size**: Line count. Flag >400 as large, >600 as needs splitting.
+- **Size**: Line count. Flag >400 for review (not automatic split — reason about it).
 - **Tests**: Inline `#[cfg(test)]` modules? Where should they go?
-- **Functions**: Any over 60 lines? God functions?
+- **Functions**: Any notably large? Are they doing one coherent thing or multiple concerns?
 - **Code quality**: Dead code, outdated patterns, unwrap/expect, error handling.
 - **Dependencies**: What does it import? What imports it? How tightly coupled?
 - **Comments**: Are they explaining "why"? Missing where logic is complex?
 - **Bugs/concerns**: Anything suspicious, risky, or architecturally wrong?
+- **Organization**: Is this file in the right place? Should it be grouped with related files?
 
 Build this into a **file-by-file audit table** below as we explore.
 
@@ -47,13 +57,18 @@ engine/planner/
 - Each test file focused on one concern, named descriptively
 - Test files import from parent module, use `super::*` or explicit imports
 
-### A.2: File Splitting
-Large files split into submodules with clear responsibility boundaries:
-- `cleanup.rs` (1212 lines) → `cleanup/{mod.rs, anthropic.rs, openai_chat.rs, openai_responses.rs}`
-- `heuristics.rs` (1221 lines) → `heuristics/{mod.rs, candidates.rs, pressure.rs}`
-- `metacog/tools.rs` (752 lines) → `tools/{mod.rs, preview.rs, read.rs, search.rs, plan.rs, status.rs}`
-- `applicator.rs` (812 lines) → extract helpers, keep orchestration
-- `engine/mod.rs` (937 lines) → extract bulk ops
+### A.2: File Splitting (Only Where It Makes Sense)
+Candidates identified during exploration. Each one gets a reasoned decision:
+- Does splitting improve clarity, or just shrink the number?
+- Are there clean responsibility boundaries, or would the split be artificial?
+- Would a reader need to jump between files to understand the logic?
+
+Preliminary candidates (to be validated during exploration):
+- `cleanup.rs` (1212 lines) — 3 format handlers, possibly natural split
+- `heuristics.rs` (1221 lines) — review for cohesion before deciding
+- `metacog/tools.rs` (752 lines) — 5 independent tools, likely good split
+- `applicator.rs` (812 lines) — review; may be one coherent pipeline
+- `engine/mod.rs` (937 lines) — review; coordinator files are naturally larger
 
 ### A.3: Module Organization
 Group related files into directories where it makes sense. Move things that are in the wrong place.
