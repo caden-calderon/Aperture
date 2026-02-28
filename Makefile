@@ -1,4 +1,4 @@
-.PHONY: dev build check lint test test-rust test-ui assert-frontend-tests clean install
+.PHONY: dev dev-full build rebuild check lint test test-rust test-ui assert-frontend-tests clean install version
 
 # ============================================================================
 # Development
@@ -7,8 +7,20 @@
 dev:
 	npm run tauri dev
 
+dev-full: rebuild
+	npm run tauri dev
+
 build:
 	npm run tauri build
+
+rebuild:
+	touch src-tauri/src/lib.rs
+	cargo build --manifest-path src-tauri/Cargo.toml --bin aperture --bin aperture-proxy --bin aperture-mcp
+	@src-tauri/target/debug/aperture-proxy --version
+
+version:
+	@echo "Local:"; src-tauri/target/debug/aperture-proxy --version 2>/dev/null || echo "  (not built)"
+	@echo "Running:"; curl -s localhost:5400/_aperture/version 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['fingerprint'])" 2>/dev/null || echo "  (proxy not running)"
 
 install:
 	npm install
@@ -80,12 +92,15 @@ clean:
 help:
 	@echo "Aperture Development Commands"
 	@echo ""
-	@echo "  make dev        - Start development server"
+	@echo "  make dev        - Start development server (main binary only)"
+	@echo "  make dev-full   - Rebuild all binaries + start dev server"
+	@echo "  make rebuild    - Force-rebuild all 3 binaries, print build hash"
 	@echo "  make build      - Build for production"
 	@echo "  make install    - Install all dependencies"
 	@echo ""
 	@echo "  make check      - Run all quality checks (lint + typecheck + test)"
 	@echo "  make lint       - Run linters"
 	@echo "  make test       - Run all tests"
+	@echo "  make version    - Show local + running build hashes"
 	@echo ""
 	@echo "  make clean      - Clean build artifacts"

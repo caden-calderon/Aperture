@@ -18,6 +18,7 @@ use crate::engine::block::Block;
 use crate::engine::budget::BudgetStatus;
 use crate::engine::planner::types::PlanActions;
 use crate::engine::planner::ContextPlanner;
+use crate::engine::types::Role;
 
 use self::plan::{context_plan, normalize_plan_arguments};
 use super::preview::{extract_preview, BlockPreview};
@@ -67,6 +68,52 @@ impl Default for ToolOutputLimits {
     }
 }
 
+/// Tracks excluded thinking blocks so preview/status can explain the token gap.
+struct ThinkingStats {
+    count: usize,
+    tokens: u32,
+}
+
+impl ThinkingStats {
+    fn from_blocks(blocks: &[Block]) -> Self {
+        let mut count = 0;
+        let mut tokens = 0u32;
+        for b in blocks {
+            if b.role == Role::Thinking {
+                count += 1;
+                tokens += b.tokens;
+            }
+        }
+        Self { count, tokens }
+    }
+
+    /// Append a note to preview/status output explaining excluded thinking tokens.
+    fn inject_note(&self, output: &mut ToolOutput, tool_name: &str) {
+        if self.count == 0 || output.is_error {
+            return;
+        }
+        let dominated = matches!(
+            tool_name,
+            "aperture_context_preview" | "aperture_context_status"
+        );
+        if !dominated {
+            return;
+        }
+        let note = format!(
+            "\n[{} thinking block{} ({}) excluded from breakdown — included in budget %]\n",
+            self.count,
+            if self.count == 1 { "" } else { "s" },
+            format_tokens(self.tokens),
+        );
+        // Insert after the first line (header) so it's immediately visible.
+        if let Some(pos) = output.content.find('\n') {
+            output.content.insert_str(pos + 1, &note);
+        } else {
+            output.content.push_str(&note);
+        }
+    }
+}
+
 impl ToolOutputLimits {
     /// Aggressive compact mode used under runaway guardrails.
     pub fn compact() -> Self {
@@ -111,11 +158,22 @@ pub fn dispatch_tool_for_session(
     planner: &ContextPlanner,
     session_id: &str,
 ) -> ToolOutput {
+    // Thinking blocks are invisible to context tools — Anthropic requires
+    // byte-identical preservation so they can never be archived/compressed.
+    // Hiding them prevents the LLM from referencing unarchivable block IDs.
+    let thinking = ThinkingStats::from_blocks(blocks);
+    let visible: Vec<Block> = blocks
+        .iter()
+        .filter(|b| b.role != Role::Thinking)
+        .cloned()
+        .collect();
+    let blocks = &visible;
+
     if let Err(msg) = validate_tool_call(name, arguments, blocks) {
         return ToolOutput::err(msg);
     }
 
-    let output = match name {
+    let mut output = match name {
         "aperture_context_preview" => context_preview(blocks, budget, planner, session_id),
         "aperture_context_read" => {
             let block_id = arguments
@@ -140,6 +198,7 @@ pub fn dispatch_tool_for_session(
         _ => ToolOutput::err(format!("Unknown tool: {name}")),
     };
 
+    thinking.inject_note(&mut output, name);
     enforce_output_limits(name, output, ToolOutputLimits::default())
 }
 
@@ -174,11 +233,20 @@ pub fn dispatch_tool_with_limits_for_session(
     limits: ToolOutputLimits,
     session_id: &str,
 ) -> ToolOutput {
+    // Thinking blocks are invisible to context tools (see dispatch_tool_for_session).
+    let thinking = ThinkingStats::from_blocks(blocks);
+    let visible: Vec<Block> = blocks
+        .iter()
+        .filter(|b| b.role != Role::Thinking)
+        .cloned()
+        .collect();
+    let blocks = &visible;
+
     if let Err(msg) = validate_tool_call(name, arguments, blocks) {
         return ToolOutput::err(msg);
     }
 
-    let output = match name {
+    let mut output = match name {
         "aperture_context_preview" => {
             context_preview_with_limits(blocks, budget, planner, limits, session_id)
         }
@@ -207,6 +275,7 @@ pub fn dispatch_tool_with_limits_for_session(
         _ => ToolOutput::err(format!("Unknown tool: {name}")),
     };
 
+    thinking.inject_note(&mut output, name);
     enforce_output_limits(name, output, limits)
 }
 

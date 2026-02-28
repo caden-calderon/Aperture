@@ -75,6 +75,21 @@
       invokeProxy<EngineSessionInfo | null>("engine_get_active_session"),
     ]);
 
+    // ── DIAG: refresh diagnostic ────────────────────────────────────
+    console.log(
+      `[DIAG:refresh] engine returned ${rustBlocks.length} blocks, ` +
+      `session=${active?.id?.slice(0, 8) ?? "none"}, ` +
+      `prev_session=${activeEngineSessionId?.slice(0, 8) ?? "none"}`
+    );
+    if (rustBlocks.length === 0 && contextStore.blocks.length > 0) {
+      console.warn(
+        `[DIAG:refresh] ENGINE RETURNED 0 BLOCKS but frontend has ${contextStore.blocks.length}. ` +
+        `This will clear all visible blocks.`
+      );
+      console.trace("[DIAG:refresh] zero-block refresh caller");
+    }
+    // ── END DIAG ────────────────────────────────────────────────────
+
     activeEngineSessionId = active?.id ?? null;
     contextStore.setActiveEngineSession(activeEngineSessionId, active?.thread_identity ?? null);
     contextStore.setEngineBlocks(rustBlocks.map(convertBlock));
@@ -126,13 +141,16 @@
 
     // Connect to proxy and subscribe to engine-processed events
     connectionStore.onContextUpdated(async () => {
+      console.log(`[DIAG:event] context_updated received, triggering refreshEngineState`);
       try {
         await refreshEngineState();
-      } catch {
-        // Not in Tauri or engine unavailable — ignore
+      } catch (e) {
+        console.warn(`[DIAG:event] refreshEngineState failed:`, e);
       }
     });
     connectionStore.onSessionReset(() => {
+      console.warn(`[DIAG:event] SESSION RESET fired — clearing all blocks (had ${contextStore.blocks.length})`);
+      console.trace("[DIAG:event] session reset caller");
       contextStore.clearBlocks();
       contextStore.setActiveEngineSession(null, null);
       selectionStore.deselect();

@@ -1,285 +1,341 @@
-# Phase 4 Token Economics Context
+# Phase 4 — Working Context
 
-## Current State (2026-02-24)
+> **For the next agent**: Read this file top to bottom before doing anything else.
+> All completed fix history has been archived to `archive-phase4-fixes.md`.
 
-**PROXY DECOUPLING COMPLETE but file-edit crash PERSISTS.** Next session: deep dive diagnostic.
-**ALL 3 FIXES VERIFIED IN R14 MANUAL TEST. Plan layering regression RESOLVED.**
+---
 
-After 3 sessions of deep diagnostic work (R11→R13), the root cause is proven by integration test:
+## Current State (2026-02-28)
 
-**Bug**: After cumulative archival removes early turns, POST-REWRITE body produces a different `thread_identity` than PRE-REWRITE body. MCP tools fall back to `active_session_id()` (set by ingest from POST-REWRITE), while the rewriter resolves from PRE-REWRITE identity. Plans get committed under session_B but the rewriter reads from session_A.
+**Version 0.10.0. Session fragmentation and block-wipe bugs FIXED + VERIFIED.**
+**Build fingerprinting pipeline operational. Active work: codebase refactor.**
 
-**Evidence chain**:
-1. `test_h9_thread_identity_diverges_after_early_turn_removal` — PASSES (identities diverge)
-2. `context_api.rs:243` — MCP falls back to `active_session_id()` when no explicit session
-3. `ingest.rs:26` — `ensure_session()` with POST-REWRITE identity sets active session
-4. Control test: middle-turn removal preserves identity (anchors intact)
+Test counts: 672 Rust + 53 frontend = 725 total. Clippy clean.
 
-**Fix 1 (DONE)**: Pass PRE-REWRITE thread_identity through capture exchange to ingest. `capture.rs:set_thread_identity()` + `handler.rs:471-481`.
-**Fix 2 (DONE)**: Guard breadcrumb on `pending_plan.is_some()` — re-application shouldn't breadcrumb. `planner/mod.rs:547+651`.
-**Fix 3 (DONE)**: Turn-aware MCP tool stripping. "Last assistant message" boundary — strip stale MCP tools, preserve recent. All 3 API formats. `planner/cleanup.rs`.
+### What changed since last update
 
-712 tests passing (659 Rust + 53 frontend), clippy clean.
+**Session fragmentation (H9) — FIXED**: `fallback_thread_identity()` in `parser/identity.rs`
+produced different hashes per request (Claude Code injects varying `<system-reminder>` content).
+Disabled fallback hashing entirely — sessions now key on `(provider, model, source, "default")`.
+Confirmed: 1 session instead of 20+, blocks accumulate correctly across turns.
 
-### R14 Manual Test (2026-02-23) — VERIFIED
-- **4+ cleans all fired correctly** — plan layering regression RESOLVED
-- Plans stacked across turns, all stayed stripping, session continued fine
-- `/context` Messages row shows cumulative JSONL size (220k+) while budget % is correct (50%)
-  - This is expected: JSONL holds full history, Aperture strips ~200k per turn via proxy
-  - Useful signal for archival — JSONL preserves everything
-- **New bug**: Parallel MCP calls crash the proxy (connection refused on port 5400)
-  - Triggered when Claude fires status + 2 searches simultaneously
-  - Proxy auto-restarts, engine reloads from SQLite, but brief partial-reload window
-  - Fix: serialize Aperture MCP calls (tokio Mutex queue) or handle concurrency in engine
-- **New observation**: Claude pauses after MCP tool calls, waits for "continue" prompt
-  - Happens after plan/stage/commit — says it will do something, then stops
-  - May be related to tool_result format or missing continuation signal
-- **Improvement idea**: Block ID display aliases (B1, B42 instead of hex UUIDs)
-  - Reduces friction for manual management
-  - Status truncates at ~86 blocks — search needed for large sessions
-  - Keep UUIDs internally, expose aliases in preview/status
+**`/context` block wipe — FIXED**: MCP tool-call bursts (from `/context` slash command) sent
+requests where the context-tool filter stripped all but 1 block. Added extreme-collapse guard
+in `is_regressive_semantic_collapse`: if old > 4 and new <= 2, always regressive (skip ingest).
+Does NOT affect Aperture tools (plan/clear/remove go through engine directly, not ingest).
 
-### R11 (2026-02-21, during hackathon demo filming)
-- Rounds 1+2 fired correctly (4+5 = 9 blocks archived, persisted across turns)
-- Round 3 (13 blocks) committed successfully (MCP returned success) but NEVER fired
-- `/context` kept growing (conversation overhead outpaced archival) confirming blocks NOT removed
-- Breadcrumb never showed round 3 additions
+**Build fingerprinting**: `build.rs` captures git hash + timestamp. All 3 binaries have
+`--version` flag. `/_aperture/version` endpoint. Proxy logs to `/tmp/aperture-proxy.log`.
+Fish function: `aperture version` (compare local vs running), `aperture logs` (tail proxy log).
+Makefile: `rebuild`, `version`, `dev-full` targets.
 
-### R12 (2026-02-21)
-- 2 successful cleans, 3rd round failed (same pattern as R11)
+**Version bumped to 0.10.0** across Cargo.toml, tauri.conf.json, package.json.
 
-### Hypotheses for 3rd-round failure
-- **H3**: `add_persistent_archives_for_session()` replaces existing list instead of merging on 3rd call
-- **H4**: Block IDs in 3rd plan don't match blocks currently in session store (stale IDs after 2 rounds of archival)
-- **H5**: Session ID diverges after multiple plan cycles (accumulation of state drift)
-- **H6**: Capacity/size issue in persistent_archived_ids that manifests at 3+ rounds
+### Known Issues (low severity)
 
-### What's Fixed (Cumulative)
+- **Primacy/Middle zone flicker during `/context`**: When the collapse guard skips MCP burst
+  ingests, the zone classification doesn't re-run. Primacy and Middle zones empty briefly
+  (system prompt block and middle blocks disappear from those zones). All blocks remain in
+  Recency. Everything restores on the next real prompt. Cosmetic only — blocks are never lost.
+- **Proxy log file empty if proxy started before Tauri rebuild**: The proxy must be spawned by
+  the updated Tauri binary to get stderr → `/tmp/aperture-proxy.log`. Use `aperture start` to
+  ensure a clean rebuild cycle.
+- **Diagnostic file logging active**: `diag()` in `engine/ingest.rs` writes to
+  `/tmp/aperture-ingest.log` on every ingest. Keep until stability fully confirmed, then remove.
+  Also DIAG `warn!` calls in `proxy/handler/exchange.rs` and `engine/mod.rs`.
 
-**Rounds 1–4 (P0 blockers):**
-- **CRITICAL-2**: `is_context_tool_name()` matches MCP-namespaced tool names
-- **CRITICAL-1**: Turn-aware projection + partial-turn stubs in all 3 API formats
-- **MEDIUM-1**: Model-aware session flip guard prevents Haiku from stealing active session
-- **Cache root cause**: Manifest removed, threshold warnings only, batch-gated heuristics
-- **Orphan tool_use sanitizer**: Prevents 400 errors from orphan tool_use after cleanup/archival
-- **Session affinity**: Plan stage/commit/append carry session hints through MCP
-- **Refactor**: 3 tranches + hygiene pass complete (see `docs/REPO_STRUCTURE.md`)
+For full fix history (plan layering, thread identity, WebKitGTK crash, proxy decoupling),
+see `archive-phase4-fixes.md`.
 
-**Rounds 5–6 (rewriter/cleanup pipeline):**
-- **BUG #1**: `sanitize_anthropic_message_structure()` — merge consecutive roles, ensure user-at-end
-- **BUG #3**: `serde_json` `preserve_order` feature — thinking block key order preserved
-- **BUG #5**: Billing header filter before `content_fingerprint()` — stable system block IDs
+---
 
-**Round 8 (thinking block corruption — 3 mechanisms + 3 additional bugs) — ALL VERIFIED R9:**
-- **F2**: Guard thinking/redacted_thinking blocks in `replace_content_block_with_stub()` — early return
-- **F3**: Exclude `Role::Thinking` from archival candidates + validation rejection
-- **F1**: Pipeline reorder: stubs → replacements → removal (indices correct before shifts)
-- **F4**: Skip merge for consecutive assistant messages with thinking blocks (insert synthetic user)
-- **Fix B**: Filter context tool blocks from engine ingest (don't accumulate MCP tool blocks)
-- **F6**: Tokenized multi-word search (split query into terms, score each independently)
-- **F5**: Unknown plan parameter detection with helpful error listing expected params
+## Active Work: Codebase Refactor
 
-### Round 10 Manual Test (2026-02-20) — PASSED
+**Master plan index**: `dev/phase-4/refactor-plan.md`
+**Detailed refactor docs**: `dev/phase-4/refactor/README.md` (overview + split audit/session files)
 
-- All 5 MCP tools confirmed working
-- All 6 plan operations confirmed (archive, compress, expand, recall, pin, shift_to)
-- Persistent archival stacking: 3 rounds accumulated correctly (8+8+5 = 21 blocks stripped)
-- Plans layered with user turns between them fire correctly
-- Remaining low-severity bugs: breadcrumb delta +0, budget % gap (~17.5% from overhead)
-- Observation: each plan cycle costs 2-3k tokens in tool overhead — target blocks >3k for ROI
+### Phase Sequence
+- **Phase A: Backend (Rust)** — IN PROGRESS (A.0 exploration underway)
+- **Phase B: Frontend (Svelte/TS)** — PENDING
+- **Phase C: Docs & Project Structure** — PENDING
 
-### R9-1/MT-1: Plan Layering Failure (P0) — FIX IMPLEMENTED
+### Phase A Sub-steps
+- **A.0: Exploration** — file-by-file audit, document every `.rs` file in the audit table ← YOU ARE HERE
+- **A.1: Test extraction** — inline `#[cfg(test)]` → `tests/` directories, one file per concern
+- **A.2: File splitting** — oversized files where splitting improves clarity (not just line count)
+- **A.3: Module organization** — files in wrong places, missing groupings
+- **A.4: Code quality** — dead code, patterns, bugs, comments
 
-**Problem**: Second/third committed plans never fire. Only first plan's 8-block archival persists.
+---
 
-**Root cause confirmed**: `commit_staged_plan_for_session()` only sets `pending_plan` — does NOT update `persistent_archived_ids`. Archive IDs only persist when `plan_for_session()` runs with a pending plan. If the pending plan is never consumed (runtime condition TBD), the archive IDs never persist.
+## A.0 Exploration — Session Protocol
 
-**JSONL evidence**:
-- Plan1 commits + fires correctly (breadcrumb shows Net: -45k, Budget: 49%)
-- Plan2 commits (MCP returns "Committed staged plan — 10 mutations")
-- But breadcrumb after plan2 commit shows ONLY plan1's 8 blocks (Net: +0, Budget: 27%)
-- Plan2's target blocks remain ACTIVE in engine (confirmed by preview)
+### Mindset: Staff Engineer Code Review
 
-**Exhaustive static analysis verified** (Rounds 10 + 10b):
-- MCP affinity → context_api → planner commit: all use correct session ✓
-- `commit_staged_plan_for_session()` correctly sets pending_plan ✓
-- No code clears pending_plan between commit and consumption ✓
-- Thread identity stable — `tool_result` gets `Role::ToolResult`, not `Role::User` ✓
-- Block IDs stable — content-fingerprint-based, position-independent ✓
-- POST-REWRITE capture doesn't change thread identity ✓
-- Streaming race condition window exists but too narrow for persistent failure ✓
+This is not a skim. This is a **staff-level code review of the entire codebase** — the kind you do before a major refactor when you need to know exactly what you're working with. Every file. Every function. Every design decision.
 
-**Runtime root cause (needs tracing)**:
-- H1: Session mismatch (static paths all resolve to S1, but something diverges at runtime)
-- H2: Streaming response race (ingest remove/insert window could cause cold-start path)
-- 3 `warn!()` calls will definitively distinguish H1 vs H2
+Read like you're the new senior engineer inheriting this codebase and you need to understand it deeply enough to make confident changes. You are building a complete, accurate picture. The audit table is the artifact — it must be good enough that another engineer could pick it up and execute the refactor without reading the source files themselves.
 
-**Fix**: Option B — add archive IDs to `persistent_archived_ids` at commit time.
-Works regardless of whether root cause is H1 or H2.
+**What "thorough" means here:**
+- Read every function, not just the top-level structure
+- Notice what's missing, not just what's present (missing error handling, missing docs, missing tests for edge cases)
+- Ask "why is this done this way?" — if you can't answer it from the code, flag it
+- Notice coupling: what does this file know about that it shouldn't?
+- Notice duplication: have you seen this pattern before in another file?
+- Notice asymmetry: are two similar things done differently for no apparent reason?
+- For large files: read the whole thing — no skimming past the bottom half
 
-**Implementation (2026-02-20)**:
-- `engine/planner/mod.rs:237-262` — `add_persistent_archives_for_session()` method
-- `metacog/tools/plan.rs:248` — Called after `commit_staged_plan_for_session()`
-- 4 diagnostic `warn!()` calls: rewriter cold-start, rewriter consume, context_api, planner
-- `mcp/server.rs:64-89` — Retry loop for `call_proxy()` (2 attempts, 500ms)
-- 3 new tests for persistent archive behavior
+This will not happen again. The goal is to do it once, do it right, and have a complete map.
 
-## R16 Deep Dive (2026-02-24) — DIAGNOSTICS IMPLEMENTED
+### Rules (Follow These Exactly)
 
-**Exhaustive code audit of ALL hot paths found ZERO panic sources in application logic.**
+1. **Pure exploration. Do NOT edit any source files. Do NOT restructure anything.**
+2. **Read files in logical groups of ~5** (4–6 max per turn). Never ingest a whole module at once — context window will fill before you can document anything.
+3. **Read each file completely.** Don't skim. Don't skip to the bottom. Don't assume a file is simple from its line count — a 150-line file can hide a subtle bug.
+4. **After each group: update the appropriate audit table file immediately** while the files are fresh. Don't batch the writing — findings degrade fast.
+   - Claude: `dev/phase-4/refactor/audit-claude.md`
+   - Codex: `dev/phase-4/refactor/audit-codex.md`
+5. **After updating the audit table: synthesize the group out loud.** Write a brief paragraph summarizing what you found — patterns, bugs, smells, design decisions, surprises. This sharpens your own understanding and makes the session handoff useful.
+6. **Check `/context` between groups.** If approaching 70%, trigger the end-of-session checklist below before stopping.
+7. **Large files (500+ lines) get their own dedicated read.** Don't pair them with others — they need full attention.
+8. **Do not re-read historical rows/logs every session.** Use `NEXT` in this file, append new rows, and only revisit old entries when explicitly reconciling a finding.
 
-### What Was Done
-1. **Full audit**: Every function in the concurrent path verified panic-safe: `dispatch_tool_with_limits_for_session`, `ingest()`, `session_blocks()`, `session_budget_status()`, `CaptureStore::finalize_streaming()`, `DynDispatcher::emit()`.
-2. **16 additional `.expect()` on Mutex locks FIXED**: RunawayGuard ×3, ActionLog ×7, CompressionQueue ×6 — all replaced with `.ok()` fallbacks. These were missed in R15 and could cascade if any lock poisoned.
-3. **Crash diagnostics IMPLEMENTED**:
-   - `std::panic::set_hook()` → `/tmp/aperture-crash.log` (ALL threads)
-   - `catch_unwind` around proxy thread
-   - `RUST_BACKTRACE=1` set programmatically
-   - Diagnostic `warn!()` in `finalize_exchange` + SSE task (ingest timing)
-4. **Key insight**: MCP server is sequential (blocking stdin loop) — proxy never sees concurrent `/_aperture/` requests. Semaphore is never contended.
+---
 
-## R17 Deep Dive (2026-02-24) — ROOT CAUSE CONFIRMED + QUICK FIX
+### End-of-Session Checklist (Do This When Context Hits ~70%)
 
-**Root cause: WebKitGTK crashes → tao calls `std::process::exit(0)` → all threads die instantly.**
+When context is filling up, **stop reading new files** and do this before the user clears:
 
-### Evidence Chain
-1. **No `/tmp/aperture-crash.log`** — global panic hook never fired. Not a Rust panic.
-2. **No dmesg OOM entries** — not memory pressure.
-3. **`coredumpctl list`** — **20 WebKitWebProcess crashes in 6 days** (Feb 18–24), all SIGABRT in libc malloc internals. Chronic WebKitGTK instability.
-4. **Timestamp correlation** (system timezone MST = UTC-7):
-   - MT1 session death: 12:09 MST → WebKit coredump: **12:10:37 MST** (1 min later)
-   - MT2 session death: ~12:56 MST → WebKit coredump: **12:58:33 MST** (2 min later)
-5. **MT2 stack trace**: `abort()` → libc malloc assertion → `_dl_deallocate_tls` → `libgallium-25.3.5` (Mesa GPU driver) → `exit()`. Heap corruption in GPU TLS cleanup.
+**1. Finish the current group first.**
+If you're mid-batch, finish documenting the files already read. Don't leave partial work.
 
-### The Kill Chain (traced through Tauri/tao/wry source)
-```
-WebKitWebProcess crashes (SIGABRT, heap corruption in Mesa/libc)
-  → WebKitGTK fires web-process-terminated signal
-  → tao receives TaoWindowEvent::Destroyed
-  → Window list becomes empty (Aperture has 1 window)
-  → RunEvent::ExitRequested fires — Aperture has NO handler (lib.rs:510 uses default)
-  → ControlFlow::Exit set (nothing calls api.prevent_exit())
-  → tao's EventLoop::run() calls std::process::exit(0)
-  → ALL threads killed instantly — no unwinding, no destructors, no crash log
-  → Port 5400 → "connection refused"
-```
+**2. Update the audit table.**
+Every file read this session must have a row in your agent audit file under `dev/phase-4/refactor/`. No gaps.
 
-**Key source locations in dependencies:**
-- `tauri-runtime-wry` `lib.rs:4171-4186` — Destroyed → empty windows → ExitRequested
-- `tao` `platform_impl/linux/event_loop.rs:979-984` — `process::exit(exit_code)`
-- Aperture `lib.rs:510` — `.run(tauri::generate_context!())` (no exit handler)
+**3. Add a session log row.**
+In `dev/phase-4/refactor/session-log.md` (under your agent — Claude or Codex), add a row for this session with date and files covered.
 
-### Quick Fix (IMPLEMENTED — partially effective)
-Changed `Builder::run()` → `Builder::build()` + `App::run()` with callback:
-- Tracks user-initiated close via `bool` (set on `WindowEvent::CloseRequested`)
-- On `ExitRequested`: if user close → allow exit; if WebKit crash → `api.prevent_exit()`
-- `lib.rs:510-580`
+**4. Update the "Covered" list in this file.**
+Move files from "NEXT" to "Covered (do NOT re-read)" in the A.0 Current Progress section below.
 
-**MT3 (parallel MCP) — FIXED**: 3+4 concurrent MCP searches all survived. Quick fix effective.
-**MT4 (file edit) — NOT FIXED**: README.md edit → WebKit coredump at 14:08:46 MST (PID 2749, identical SIGABRT/libgallium stack). App died — exit path bypassed handler entirely (no trace log written).
-**MT5 (file edit, with tracing)** — **NOT a crash**: exit trace shows clean sequence:
-```
-CloseRequested(user_close=true) → Destroyed → ExitRequested(allowed) → Exit
-```
-No coredump, no panic. The window received a `CloseRequested` event that our handler interpreted as user-initiated close.
+**5. Update the "NEXT" list.**
+The first file in NEXT should be the actual next unread file — not one already covered.
 
-### Two Separate File-Edit Death Mechanisms
-1. **WebKit crash (MT4)**: SIGABRT in libgallium/Mesa. Kills process before ExitRequested fires. Our handler is irrelevant — the process is dead before it gets a chance.
-2. **Vite HMR reload (MT5)**: Vite's chokidar watches the project root (only ignores `**/src-tauri/**` per `vite.config.js:52-54`). Any non-Rust file change (README.md, docs/*.md) triggers a full-page reload signal to the webview → `CloseRequested` → clean exit. Our handler allows it because `user_close=true`.
+**6. Update "Key Findings So Far" if anything new was found.**
+Any new bugs or smells not yet in that section should be added. Don't duplicate entries already there.
 
-Both are resolved by the proper fix (proxy as separate process — immune to both WebKit crashes and Vite restarts).
+**7. Update `bugs.md` if new bugs were found.**
+If you found a new real bug (not just a smell), add it to `~/.claude/projects/-home-caden-projects-Aperture/memory/bugs.md`.
+The audit tables remain the source of truth; `bugs.md` is the external bug index.
 
-### Open Questions
-- **Why does Vite full-page reload kill the Tauri app?** A Vite HMR reload should just refresh the webview content, not close the window. Possible: WebKitGTK handles the reload poorly, or `tauri dev` interprets the reload as a restart signal.
-- **MT1 24-minute gap**: Proxy died at 11:46 MST but WebKit coredump at 12:10 MST. Suggests proxy died independently or WebKit partially failed first.
-- All questions mooted by the proper fix (proxy as separate process).
+**8. Tell the user what you did and what's next.**
+Brief summary: files covered this session, most interesting finding, exact next file to pick up from.
 
-### Proxy Decoupling — IMPLEMENTED (2026-02-24)
-Proxy decoupled from Tauri's process lifecycle:
-- `aperture-proxy` binary owns engine + proxy (separate PID, survives all Tauri/WebKit crashes)
-- Tauri spawns it as detached process (setsid on Unix), connects via HTTP/SSE
-- `BroadcastDispatcher` → `tokio::sync::broadcast` → SSE at `/_aperture/events`
-- `/_aperture/ipc/{command}` — HTTP IPC replaces all Tauri engine/hot-patch commands
-- Frontend uses `invokeProxy()` (fetch) + `EventSource` instead of Tauri `invoke()`/`listen()`
-- Terminal stays as Tauri IPC (PTY is process-local)
-- CORS headers on all `/_aperture/` responses for webview cross-origin access
-- 667 Rust tests + 53 frontend tests passing, clippy clean
+---
 
-**RESULT**: UI connects to proxy successfully. Proxy survives Tauri window close.
-**BUT**: File edits through `aperture claude` still cause the UI to disconnect/crash.
-The proxy process itself stays alive (confirmed healthy on port 5400 after crash), but
-the Tauri webview dies and the frontend loses its SSE connection.
+### What to Document Per File (Audit Table Columns)
 
-### File-Edit Crash — RESOLVED (2026-02-24)
+- **Lines**: Exact count
+- **Purpose**: One sentence — what does this file own?
+- **Tests**: Inline `#[cfg(test)]`? How many lines? Or none?
+- **Issues**: Bugs, smells, dead code, architectural concerns — **see detail standard below**
+- **Action Needed**: Concrete next step, specific enough to start writing code from
 
-**Root cause confirmed**: Tailwind v4's oxide scanner puts `.md` files into Vite's module graph
-via `addWatchFile()`. When any markdown file changes, Vite triggers `{ type: "full-reload" }`
-because `.md` is a non-CSS file with only CSS importers (HMR dead end). The full-page reload
-either (a) refreshes the webview cleanly or (b) triggers a WebKitGTK SIGABRT in Mesa/libgallium
-during GPU repaint.
+#### Detail Standard — Issues Column
 
-**Evidence chain**:
-1. `coredumpctl list` — 20 WebKitWebProcess SIGABRT in 6 days, all in libgallium heap corruption
-2. Tailwind oxide scanner includes `.md` in `template-extensions.txt` → `addWatchFile()` → module graph
-3. `vite:css-analysis` links `.md` files as CSS module dependencies → `getModulesByFile()` finds them
-4. HMR propagation: non-CSS, non-SVG with only CSS importers = dead end → `needFullReload = true`
-5. `vite.config.js` only ignored `**/src-tauri/**` — all other files triggered the chain
+Vague entries are worthless at execution time. Every issue must include:
+- **Where**: file + function name + line number
+- **What it does wrong**: the precise mechanism, not a label ("mismatches pairs" not "matching bug")
+- **Conditions**: when does this actually matter? what breaks?
+- **How to fix**: concrete enough that someone can start implementing without re-reading the file
 
-**Fix applied**:
-- Expanded `server.watch.ignored` in `vite.config.js` to cover `**/*.md`, `**/dev/**`, `**/docs/**`,
-  `**/.claude/**`, `**/.context/**`, `**/target/**`
-- Chokidar no longer watches these paths → no module graph invalidation → no reload
-- Verified: markdown edits from within Aperture project dir no longer crash UI
+**Bad**: `"Tool chain matching bug — fix tool_use_id"`
+**Good**: `"build_dependencies() line 181 matches ToolUse→ToolResult by tool_name string. If read_file is called twice in one session, find() returns the first ToolResult after each ToolUse's turn — second ToolUse at turn 7 may steal the result already claimed by turn 3. Fix: add tool_use_id: Option<String> to BlockMetadata, populate in parser, match by ID in build_dependencies() with name as fallback."`
 
-**Remaining WebKitGTK instability**: Mesa/libgallium SIGABRT can still occur spontaneously
-(not triggered by file edits). Proxy decoupling handles this — engine/proxy survive all
-Tauri/WebKit crashes. Updating Mesa drivers is the real fix (outside Aperture's scope).
+#### Uncertain Findings — Log Them, Don't Drop Them
 
-**Session lifecycle UX** (also fixed this session):
-- App starts with clean slate (no stale blocks from previous session)
-- Blocks clear ~15s after client exits (idle timeout fires session reset)
-- New session blocks populate on first `context_updated` event
+If you spot something that looks wrong but can't confirm it without reading another file:
+1. **Do not discard it.** Half-seen bugs are still bugs.
+2. Add it to the **Uncertain Findings table** in `dev/phase-4/refactor/uncertain-findings.md` with: what you observed, what file/function would confirm or deny it.
+3. Note it in your synthesis paragraph as well.
+4. Move on. The reconciliation pass investigates these after all files are read.
 
-## Remaining Work (Priority Order)
+### Philosophy
+Line counts are guidelines for flagging, not mandates for splitting. A 500-line file that is cohesive stays as-is. A 70-line function doing one clear thing is fine. The question is always: **"Does splitting this actually improve clarity, or just make the number smaller?"** If the answer is the latter, leave it.
 
-### Completed
-1. ~~Implement R9-1 Option B fix~~ — **DONE**
-2. ~~Add diagnostic tracing~~ — **DONE**
-3. ~~Add MCP call_proxy retry~~ — **DONE**
-4. ~~Manual test Round 10~~ — **PASSED**
-5. ~~Fix 1 (session divergence)~~ — **DONE**
-6. ~~Fix 2 (breadcrumb guard)~~ — **DONE**
-7. ~~Fix 3 (MCP tool stripping)~~ — **DONE**
-8. ~~Manual test Round 14~~ — **PASSED (4+ cleans, regression resolved)**
-9. ~~Analyze R14/R15 logs~~ — **DONE (R17: root cause = WebKitGTK → process::exit)**
-10. ~~Fix parallel MCP crash (quick fix)~~ — **DONE (ExitRequested handler, MT3 confirmed)**
-11. ~~Proxy decoupling~~ — **DONE (2026-02-24)** — Separate `aperture-proxy` process
-12. ~~File-edit crash~~ — **DONE (2026-02-24)** — Vite ignore patterns + session idle clearing
+---
 
-### Active: Codebase Refactor (Multi-Session)
-**Plan**: `dev/phase-4/refactor-plan.md`
+## A.0 Current Progress
 
-**Phase A: Backend (Rust)** — IN PROGRESS
-- A.0: Exploration — file-by-file audit of every .rs file (NEXT)
-- A.1: Test extraction — inline tests → `tests/` directories (per-concern files, NOT mega tests.rs)
-- A.2: File splitting — oversized files into submodules
-- A.3: Module organization — group related files, fix misplacements
-- A.4: Code quality — dead code, patterns, comments, bugs
+### **ALL 87 FILES COVERED — A.0 EXPLORATION COMPLETE (2026-02-25)**
 
-**Phase B: Frontend (Svelte/TS)** — PENDING (after Phase A)
-**Phase C: Docs & Project Structure** — PENDING (after Phase B)
+A.0 is done. Proceed directly to **A.1: Test extraction** (inline `#[cfg(test)]` → `tests/` directories).
 
-### Backlog (Post-Refactor)
-13. **Block ID display aliases** — B1/B42 style aliases mapped to UUIDs
-14. **Fix breadcrumb delta bug** — low severity, delta shows +0 on re-archival
-15. **Fix budget % gap** — include overhead in engine budget calculation
-15. **Fix D: Cache + Archival Death Spiral** — cache-aware archival strategy
-16. **P1: Economics Ledger** — token cost instrumentation
-17. **P3: Schema Overhead Reduction** — consolidate tools, lazy injection
+**Covered (do NOT re-read):**
+All of `engine/`, `engine/planner/`, `proxy/`, `metacog/`, `events/`, `mcp/`, `terminal/`, and crate roots/bins — complete.
 
-See `tasks.md` for full checklist with subtasks.
+- `engine/types.rs`, `engine/block.rs` — pure data enums/structs, clean
+- `engine/zone.rs`, `engine/session.rs`, `engine/store.rs` — core data structures
+- `engine/budget.rs`, `engine/staleness.rs`, `engine/tokens.rs`, `engine/dependency.rs` — economics/scoring
+- `engine/versioning.rs`, `engine/action_log.rs`, `engine/policy.rs`, `engine/pipeline.rs`, `engine/ingest.rs` — operation layer
+- `engine/session_sync.rs`, `engine/storage.rs`, `engine/mod.rs`, `engine/tests.rs` — persistence + coordinator + tests
+- `engine/compression/mod.rs`, `engine/compression/queue.rs`, `engine/compression/provider.rs` — compression
+- `engine/planner/types.rs`, `engine/planner/validation.rs`, `engine/planner/relevance.rs`, `engine/planner/manifest.rs` — planner foundations
+- `engine/planner/file_tracker.rs`, `engine/planner/heuristics.rs`, `engine/planner/cleanup.rs`, `engine/planner/applicator.rs`, `engine/planner/mod.rs` — planner core
+- `engine/planner/tests.rs` — 2010L planner test suite
+- `proxy/mod.rs`, `proxy/error.rs`, `proxy/runaway_guard.rs`, `proxy/hot_patch.rs`, `proxy/provider_adapter.rs`
+- `proxy/parser/overhead.rs`, `proxy/parser/identity.rs`, `proxy/parser/mod.rs`, `proxy/parser/anthropic.rs`
+- `proxy/parser/openai.rs`, `proxy/parser/tests.rs`
+- `proxy/rewriter.rs`, `proxy/rewriter/trailing.rs`, `proxy/rewriter/signals.rs`, `proxy/rewriter/sanitize.rs`, `proxy/rewriter/payload.rs`, `proxy/rewriter/tests.rs`
+- `proxy/capture.rs`, `proxy/capture/sse.rs`, `proxy/capture/tests.rs`
+- `proxy/handler.rs`, `proxy/handler/exchange.rs`, `proxy/handler/headers.rs`, `proxy/handler/routing.rs`, `proxy/handler/tests.rs`
+- `proxy/interceptor.rs`, `proxy/interceptor/response.rs`, `proxy/interceptor/tests.rs`
+- `proxy/context_api.rs`, `proxy/context_api/tests.rs`, `proxy/ipc_api.rs`
+- `metacog/mod.rs`, `metacog/passive.rs`, `metacog/claude_mcp.rs`, `metacog/preview.rs`
+- `metacog/runtime.rs`, `metacog/codex_proxy.rs`, `metacog/tools/plan.rs`, `metacog/tools/tests.rs`, `metacog/tools.rs`
+- `events/types.rs`, `events/broadcaster.rs`, `events/dispatcher.rs`, `events/mod.rs`
+- `mcp/mod.rs`, `mcp/server.rs`, `mcp/tests.rs`
+- `terminal/error.rs`, `terminal/session.rs`, `terminal/mod.rs`, `terminal/codex_bridge.rs`
+- `lib.rs`, `util.rs`, `main.rs`, `bin/aperture_mcp.rs`, `bin/aperture_proxy.rs`
 
-## Architecture Ownership Map
+### NEXT: Begin A.1 — Test extraction
+
+A.0 is complete. Next phase is **A.1: Extract inline `#[cfg(test)]` blocks to `tests/` directories**.
+
+Target files (all have inline tests that need extraction):
+- `engine/`: zone, session, store, budget, staleness, tokens, dependency, versioning, action_log, policy, pipeline, storage, compression/mod, compression/queue, compression/provider, planner/types, planner/relevance, planner/manifest, planner/file_tracker, planner/heuristics, planner/cleanup, planner/applicator → `engine/tests/`
+- `proxy/`: mod, runaway_guard, hot_patch + all submodule inline tests → `proxy/tests/`
+- `metacog/`: mod, passive, claude_mcp, preview, runtime, codex_proxy → `metacog/tests/`
+- `events/broadcaster.rs` → `events/tests/`
+- `terminal/session.rs`, `terminal/mod.rs`, `terminal/codex_bridge.rs` → `terminal/tests/`
+- `util.rs` → `tests/util_tests.rs`
+
+Large files already properly separated: `engine/tests.rs`, `engine/planner/tests.rs`, `proxy/parser/tests.rs`, `proxy/rewriter/tests.rs`, `proxy/capture/tests.rs`, `proxy/handler/tests.rs`, `proxy/interceptor/tests.rs`, `proxy/context_api/tests.rs`, `mcp/tests.rs`, `metacog/tools/tests.rs` — no extraction needed (already separate).
+
+---
+
+---
+
+## Codex Pass — State
+
+Codex does a second independent pass over the same files in the same order as Claude.
+The goal is a double-check: catch things Claude missed, confirm things Claude flagged.
+
+**Codex: read this section to know where you are.**
+
+### Codex Instructions
+1. Follow the same session protocol as Claude (groups of ~5, update table immediately, synthesize, check context).
+2. Add your findings to `dev/phase-4/refactor/audit-codex.md` — not Claude's audit file.
+3. Read `dev/phase-4/refactor/audit-claude.md` for the files you're about to read **after** doing your own analysis, not before. You want an independent take first, then compare.
+4. If you confirm a Claude finding, note "Confirmed: [issue]" in your Issues column. If you find something Claude missed, note it fresh.
+5. Follow the same end-of-session checklist above, updating the **Codex Sessions** log (not Claude's).
+6. **Strict lockstep rule**: Codex must stay behind Claude coverage. Do not read any file that does not already have a Claude row in `dev/phase-4/refactor/audit-claude.md`.
+7. If Codex reaches/passes Claude's frontier, **stop reading** and wait. Resume only on files Claude has covered.
+
+### Codex Files Covered: 87 of 87 Claude-covered files (A.0 complete)
+
+**Covered (do NOT re-read):**
+- `engine/types.rs`, `engine/block.rs`
+- `engine/zone.rs`, `engine/session.rs`, `engine/store.rs`
+- `engine/budget.rs`, `engine/staleness.rs`, `engine/tokens.rs`, `engine/dependency.rs`
+- `engine/versioning.rs`, `engine/action_log.rs`, `engine/policy.rs`, `engine/pipeline.rs`, `engine/ingest.rs`
+- `engine/session_sync.rs`, `engine/storage.rs`
+- `engine/mod.rs`, `engine/tests.rs`
+- `engine/compression/mod.rs`, `engine/compression/queue.rs`, `engine/compression/provider.rs`
+- `engine/planner/types.rs`, `engine/planner/validation.rs`, `engine/planner/relevance.rs`, `engine/planner/manifest.rs`
+- `engine/planner/file_tracker.rs`, `engine/planner/heuristics.rs`, `engine/planner/cleanup.rs`, `engine/planner/applicator.rs`, `engine/planner/mod.rs`
+- `engine/planner/tests.rs`, `proxy/parser/openai.rs`
+- `proxy/mod.rs`, `proxy/error.rs`, `proxy/runaway_guard.rs`, `proxy/hot_patch.rs`, `proxy/provider_adapter.rs`
+- `proxy/parser/overhead.rs`, `proxy/parser/identity.rs`, `proxy/parser/mod.rs`, `proxy/parser/anthropic.rs`
+- `proxy/parser/tests.rs`
+- `proxy/rewriter.rs`, `proxy/rewriter/trailing.rs`, `proxy/rewriter/signals.rs`, `proxy/rewriter/sanitize.rs`, `proxy/rewriter/payload.rs`
+- `proxy/rewriter/tests.rs`
+- `proxy/capture.rs`, `proxy/capture/sse.rs`, `proxy/capture/tests.rs`
+- `proxy/handler.rs`
+- `proxy/handler/exchange.rs`, `proxy/handler/headers.rs`, `proxy/handler/routing.rs`, `proxy/handler/tests.rs`
+- `proxy/interceptor.rs`, `proxy/interceptor/response.rs`, `proxy/interceptor/tests.rs`
+- `proxy/context_api.rs`, `proxy/context_api/tests.rs`, `proxy/ipc_api.rs`
+- `metacog/mod.rs`, `metacog/passive.rs`, `metacog/claude_mcp.rs`, `metacog/preview.rs`
+- `metacog/runtime.rs`, `metacog/codex_proxy.rs`, `metacog/tools/plan.rs`, `metacog/tools/tests.rs`, `metacog/tools.rs`
+- `events/types.rs`, `events/broadcaster.rs`, `events/dispatcher.rs`, `events/mod.rs`
+- `mcp/mod.rs`, `mcp/server.rs`, `mcp/tests.rs`
+- `terminal/error.rs`, `terminal/session.rs`, `terminal/mod.rs`, `terminal/codex_bridge.rs`
+- `lib.rs`, `util.rs`, `main.rs`, `bin/aperture_mcp.rs`, `bin/aperture_proxy.rs`
+
+**NEXT (Codex):**
+A.0 is complete for Codex. Begin **A.1 test extraction** in lockstep with the phase plan.
+
+---
+
+## Key Findings So Far (Do NOT Re-Investigate)
+
+Already logged in the audit table. Captured here for continuity.
+
+**Universal pattern**: Every source file with logic has inline `#[cfg(test)]`. Test extraction to `engine/tests/<concern>_tests.rs` is the entire A.1 phase. ~12 files need it.
+
+**Bugs found:**
+- `engine/dependency.rs`: Tool chain matching uses tool name, not `tool_use_id` — mismatches when same tool called twice in a session
+- `engine/ingest.rs`: `block_semantic_fingerprint()` uses `DefaultHasher` (SipHash, randomly seeded per process) — fingerprints non-deterministic, regression guard may silently fail
+- `engine/pipeline.rs`: `recency_boost` in `HeuristicResult` is computed but never read by `classify()` — dead field
+- `engine/store.rs`: `replace_all()` claims atomic replacement but performs `clear()` + reinserts, allowing concurrent readers to observe transient empty/partial state
+- `engine/session.rs`: `SessionStore::create()` can flip active session on same provider+model even when current active session is substantial (possible unintended session steal in multi-session same-model workflows)
+- `engine/storage.rs`: `load_block_ids()` orders only by `turn_index`; blocks sharing a turn can reload in nondeterministic order, changing same-turn fragment ordering
+- `engine/mod.rs`: `clear_all_sessions()` clears in-memory state even if DB delete calls fail, allowing state resurrection on restart
+- `engine/compression/mod.rs`: `default_backend_for_provider()` misses explicit `"openrouter"` provider name, so Auto can misroute to Anthropic
+- `engine/planner/heuristics.rs`: `is_archival_candidate()` docs say Recency is excluded, but code excludes only Primacy; at soft pressure Recency blocks can still be archived
+- `engine/planner/applicator.rs`: archival dominance is enforced only for engine updates; in partial-turn archive+compress/update cases, payload can still emit conflicting replacement + stub decisions
+- `engine/planner/mod.rs`: threshold warning text reports budget ceiling percent as soft/medium/hard threshold percent, misleading operators under custom ceilings
+- `engine/planner/mod.rs`: `commit_staged_plan_for_session()` does not atomically update `persistent_archived_ids` — caller must separately call `add_persistent_archives_for_session()`. Two-step API where omitting either step silently causes regression (R9-1 regresses if step 2 omitted).
+- `engine/planner/mod.rs`: R9-DIAG `warn!()` at line 555 is still in production — fires on every pending plan application; should be downgraded to `debug!()` post-regression-resolution
+- `proxy/parser/mod.rs` + `proxy/parser/identity.rs`: `stable_block_id()` and `short_hash()` both use `DefaultHasher::new()` — currently deterministic (fixed SipHash initial state) but API contract says "not specified, may change." Rust version upgrade could silently change block IDs and break session continuity + archived block re-application. Fix both with `FxHasher` alongside the `ingest.rs` fix.
+- `proxy/parser/anthropic.rs`: billing-header filter logic duplicated in both `anthropic.rs` and `identity.rs` — extract shared helper.
+- `proxy/parser/openai.rs`: unknown roles default to `Role::User`; OpenAI `developer` messages are misclassified and lose primacy semantics.
+- `proxy/parser/openai.rs` + `engine/block.rs`: tool call IDs (`tool_call_id`/`call_id`) are parsed into content strings but not persisted in block metadata; deterministic ToolUse→ToolResult matching cannot be completed until `tool_use_id` is added to metadata and populated in parsers.
+- `proxy/parser/openai.rs`: `parse_openai_responses_request()` missing `"function_call"` input item handler (line 412) — assistant tool calls appearing in Responses API history array fall to unknown branch → wrong role (User instead of ToolUse), wrong content format. Breaks multi-turn Codex session continuity.
+- `proxy/parser/tests.rs` H9 confirmed: `test_h9_thread_identity_diverges_after_early_turn_removal` (`assert_ne!()`) documents that archiving early turns changes `fallback_thread_identity` hash (first user+assistant pair is the anchor). After early-turn archival, all subsequent requests get a new session ID, orphaning plans stored under original session. Active bug for all fallback-identity conversations.
+- `proxy/rewriter/payload.rs`: `replace_anthropic_content()` always writes system message as `Value::String` regardless of original format — if system was content-block array, format changes to string, invalidating Anthropic's cache prefix for the system block (cache miss until next natural turn resets the prefix).
+- `proxy/rewriter/payload.rs`: `replace_message_content()` only replaces the FIRST `text`/`input_text` block in array content — remaining text blocks survive unchanged alongside the stub, leaving stale content in the payload.
+- `proxy/rewriter/signals.rs`: `collect_traffic_signals()` parses request body a THIRD time (after parser module parse + rewriter mutation parse) — hot-path waste; fix by accepting pre-parsed `&Value`.
+- `proxy/capture/sse.rs`: **tool/function streaming outputs are dropped in SSE reconstruction** (Anthropic/OpenAI Chat/Responses paths are text-only), so tool-use streaming turns can be lost from captured history.
+- `proxy/capture.rs`: `finalize_streaming()` marks parse failures as `Complete` instead of `Failed`, hiding reconstruction failures.
+- `proxy/handler.rs`: request tracing uses two different UUIDs (span `request_id` vs runtime `request_id`), making correlation between logs and capture records unreliable.
+- `proxy/capture/sse.rs`: **[NEW BUG]** `extract_anthropic_final_response` (and OpenAI equivalents) only accumulate `delta.text` — tool_use streaming (`input_json_delta`) is silently dropped. All 3 SSE extractors produce incomplete captures: no ToolUse response blocks for any streaming tool call. Affects dependency tracking, usage heat, staleness for all streaming tool-using turns.
+- `proxy/handler.rs`: Duplicate `request_id` generation — `#[instrument]` macro creates one UUID for span, line 38 creates a second. Span IDs and CaptureStore IDs are uncorrelated (can't join logs to captures).
+- `proxy/capture.rs`: `evict_if_needed()` iterates DashMap in shard-hash order (not insertion order) → not FIFO; arbitrary entries evicted rather than oldest.
+- `proxy/handler.rs` + `proxy/handler/exchange.rs` + `proxy/rewriter.rs`: **R9-DIAG `warn!()` production blast radius is larger than previously known** — 5 total DIAG warns fire on EVERY request: 2 in `rewriter.rs`, 1 in `handler.rs` (SSE stream complete), 2 in `exchange.rs` (ingest start + complete). All 5 need downgrade to `debug!()` in the same cleanup pass.
+- `metacog/preview.rs`: **`extract_head` UTF-8 truncation panic** — `head.truncate(MAX_PREVIEW_CHARS)` at byte offset 300, panics on multi-byte char boundary. Same class as `manifest.rs`.
+- `metacog/tools.rs`: **`context_search` scope: "all" is a no-op** — tool schema documents this as "includes archived blocks" but function searches same slice regardless of scope parameter. Misleading for the model.
+- `metacog/tools.rs`: **`extract_search_snippet` UTF-8 panic** — `&snippet[..max_len]` slices at byte offset after `replace('\n', " ")`. Panics on multi-byte content in snippet window. Same class as preview.rs/manifest.rs.
+- `metacog/codex_proxy.rs`: Responses `extract_context_calls` accepts missing `call_id` (`unwrap_or("")`) and emits calls/results with empty IDs, making tool-call/result pairing ambiguous on malformed upstream payloads.
+- `mcp/server.rs`: `send_response()` / `send_error()` use `expect()` on stdout writes/flush; broken stdio pipe can panic and kill MCP server instead of graceful shutdown.
+- `terminal/codex_bridge.rs`: **no subprocess timeout** — `fetch_thread_blocks()` calls `child.wait_with_output()` with no timeout; if `codex app-server` hangs, the entire bridge thread blocks and `stop_rx` is never checked.
+- `terminal/codex_bridge.rs`: **unstable block IDs per poll** — `make_block()` calls `Uuid::new_v4()` on every invocation; each poll cycle generates entirely new block IDs even for unchanged content, breaking engine dedup, fingerprinting, and block reference continuity.
+- `terminal/codex_bridge.rs`: startup cursor initializes to EOF (`file_len_or_zero`), so existing active sessions in history are ignored until a new history line is appended.
+- `terminal/codex_bridge.rs`: request IDs are second-granularity timestamps (`codex-session-{id}-{unix_secs}`), allowing collisions for multiple emits in the same second.
+- `lib.rs`: Unix proxy detach path ignores `setsid()` return value in `pre_exec`; detach failure is silent.
+
+**Smells found:**
+- `fn iso_now()` wrapper duplicated in `session.rs`, `action_log.rs`, `versioning.rs` — call `crate::util::iso_now()` directly
+- `recount_block_tokens()` in `tokens.rs` is a pointless one-line wrapper around `count_tokens()`
+- `tokens_by_zone()` returns `HashMap<String, u32>` but `tokens_by_role()` returns `HashMap<Role, u32>` — inconsistent types in the same file
+- `engine/tests.rs`: one assertion is tautological and three tests use `ContextEngine::new()` (real SQLite path), reducing test signal quality and isolation
+- `engine/planner/mod.rs`: `format_tokens()` private fn duplicated in both `mod.rs` and `applicator.rs` — confirmed; extract both to `engine::format` shared module
+- `engine/planner/mod.rs`: 8 legacy `LEGACY_SESSION_ID` wrapper methods — only needed until tests migrate to session-aware API, then can be removed
+- `engine/planner/mod.rs`: `is_batch_point_for_session()` and `check_alert_level_change_for_session()` have implicit call-order dependency — undocumented
+- `proxy/runaway_guard.rs`: proxy hard-limit alerts remain cooldown-gated (unlike context hard-limit behavior), potentially under-signaling sustained proxy burst incidents.
+- `events/broadcaster.rs`: bounded broadcast queue can still drop events for lagging receivers; sender-side `send()` error cannot detect overflow (drops are surfaced as receiver lag).
+- `metacog/tools.rs`: `format_tokens()` is now the **third copy** (mod.rs + applicator.rs + tools.rs, same exact logic). Extract to `crate::util`.
+- `metacog/runtime.rs`: `context_tools_mode()` reads env var on every call (syscall per request); `detect_runtime` has over-broad `/responses` path match that could misclassify non-OpenAI paths.
+- `metacog/codex_proxy.rs`: `inject_tools()` calls `context_tool_definitions()` directly instead of `self.tool_definitions()` — bypasses any per-runtime overrides.
+- `metacog/tools/tests.rs`: `mock_budget` hardcodes alert thresholds (80/90/95%) duplicating engine constants — same smell as `engine/tests.rs`.
+- `metacog/runtime.rs`: `parse_context_tools_mode()` is fail-open on unknown values, so env-var typos silently re-enable tools.
+- `metacog/tools/plan.rs`: `control.op` parsing is strict lowercase; semantically-valid mixed-case ops from models are rejected.
+
+---
+
+## Architecture Reference
+
+Ownership map — what each module owns and must not do:
 
 | Module | Owns | Must Not |
 |--------|------|----------|
@@ -292,23 +348,12 @@ See `tasks.md` for full checklist with subtasks.
 | **Capture** (`proxy/capture/*`) | Capture store lifecycle, SSE reconstruction | Own session policy or rewrite decisions |
 | **MCP** (`mcp/*`) | JSON-RPC transport, tool routing, session affinity forwarding | Own planner semantics or mutation policy |
 
-## Key Constraints
+### Key Constraints (Don't Violate These While Exploring)
+- **Stateless clients**: All major LLM coding tools send full conversation history each request. Aperture re-applies archive mutations every turn to keep forwarded prefix stable.
+- **API invariants**: Every `tool_use` needs a `tool_result`; non-empty content blocks required; turn alternation (user/assistant) must be maintained.
+- **Cache hierarchy (Anthropic)**: tools → system → messages. Changes at any level invalidate that level + all below.
 
-### Cache Economics
-- **Anthropic**: Cache hierarchy tools→system→messages. Cumulative hashes. 1.25× write, 0.1× read. Max 4 breakpoints.
-- **OpenAI**: Fully automatic. Free write, 50-90% read discount. 1024 min cacheable.
-- **Both**: Tool/system changes invalidate from that point onward.
-
-### Stateless Clients
-All major LLM coding tools send full conversation history each request. Aperture must re-apply archive mutations every turn to keep forwarded prefix stable.
-
-### API Invariants
-- Every `tool_use` needs a `tool_result` (Anthropic)
-- Non-empty content blocks required
-- Turn alternation (user/assistant) must be maintained
-- Partial-turn stubs preserve these invariants; full-turn removal is safe
-
-## P0 Mitigations (Preserved)
+### P0 Mitigations (Keep These in Mind During Code Review)
 - Argument validation, output size caps (8KB normal, 2KB compact)
 - Proxy runaway guard (rolling window, fail-open)
 - Circuit breaker (60s lockout on 24+ calls/60s)
@@ -316,66 +361,12 @@ All major LLM coding tools send full conversation history each request. Aperture
 - Orphan sanitizers (both directions)
 - Deterministic block IDs, staged planning controls
 
-## Diagnostic History
+---
 
-| Round | Report | Key Finding |
-|-------|--------|-------------|
-| 1–2 | `deep-dive-diagnostics-round-{1,2}-2026-02-19.md` | Projection mismatch, cleanup naming, session flips |
-| 3 | `deep-dive-diagnostics-round-3-2026-02-19.md` | Elevated CRITICAL-1, confirmed round-2 findings |
-| 4 | `deep-dive-diagnostics-round-4-consolidated-2026-02-19.md` | Cascading failure chain proven, all fixes designed |
-| **5** | **`deep-dive-diagnostics-round-5-2026-02-19.md`** | **3 new P0/P1 bugs in rewriter/cleanup pipeline** |
-| **10** | **`deep-dive-diagnostics-round-10-2026-02-19.md`** | **R9-1 root cause: persistent_archived_ids gap at commit. Option B fix confirmed.** |
-| **R10-MT** | **RESUME.md inline (2026-02-20)** | **Best run — 2 successful cleans, all tools/ops verified, 3 fixes implemented** |
-
-Manual test logs in `~/.claude/projects/-home-caden-projects-Aperture/`:
-- **MT1/R17 (2026-02-24)** `3fef6a4a...` — 3 parallel + 2 parallel both crashed. WebKit coredump at 12:10 MST (PID 110966, SIGABRT). File edit crash reproduced at session end.
-- **MT2/R17 (2026-02-24)** `02fae9ca...` — 3 parallel survived, 4 parallel crashed (2 ok, 2 fail). WebKit coredump at 12:58 MST (PID 191047, SIGABRT in libgallium/Mesa TLS). No Rust panic log. Root cause confirmed: WebKitGTK → process::exit(0).
-- **MT3/R17 (2026-02-24)** — Quick fix compiled. 3+4 parallel MCP searches ALL survived (fix works for parallel). Claude edited `lib.rs` → app restarted (expected: Tauri dev watcher hot-reload on Rust source change, not a bug).
-- **MT4/R17 (2026-02-24)** — README.md edit. WebKit coredump at 14:08:46 MST (PID 2749, SIGABRT/libgallium). No exit trace written — process died before handler fired.
-- **MT5/R17 (2026-02-24)** — File edit with exit tracing. Clean exit: `CloseRequested → Destroyed → ExitRequested(allowed) → Exit`. No coredump. Vite HMR full-page reload on non-source file change → window closed. Two file-edit death mechanisms confirmed: (a) WebKit crash (MT4), (b) Vite HMR reload (MT5).
-- **R15 (2026-02-24)** `3fef6a4a...` — Parallel MCP crash fix test. Fix WAS compiled (confirmed via `strings`). Crash reproduced 2× (3 parallel, 2 parallel) despite semaphore. File edits worked. Crash is below handler level.
-- **R14 (2026-02-23)** `a9cf1a72...` ("Yooo") — 3 plan cycles worked. 2 parallel MCP crashes. UUID hallucination. `267a1c72...` ("whats up") — 4 plan cycles worked. No crash (only 1 parallel pair). Pausing pattern.
-- **Round 10 manual test (2026-02-20)** — TBD (find in session logs)
-- `5a933896...` — Round 9 manual test (Sonnet 4.6, 87 turns)
-- `db654aac...` — Round 5 manual test ("whats poppin claude")
-- `1baf6b88...` — Pre-fix ("Yoo claude")
-- `df4ad515...` — Pre-fix ("whats up claude")
-- `66dd683a...` — Fresh repro ("claude!")
-
-## Proxy Decoupling Architecture (Proper Fix)
-
-### Why Decouple
-The proxy and engine have zero dependency on Tauri/WebKit. They share a process only because of initial convenience. When WebKitWebProcess crashes (chronic, 20× in 6 days on Linux), `tao` calls `process::exit(0)` and kills the proxy as collateral damage. The quick fix (ExitRequested handler) prevents this, but the proxy is still vulnerable to Tauri main process crashes.
-
-### Current Coupling Points
-1. **`DynDispatcher`** — type-erased `Arc<dyn Fn(&ApertureEvent) + Send + Sync>`. Currently wraps `app_handle.emit()`. Only 6 call sites: 5 in proxy handler (request/response/blocks/error events), 1 in engine (`context_updated`).
-2. **29 `#[tauri::command]` functions** in `lib.rs` (lines 114-369) — direct `Arc<ContextEngine>` method calls via Tauri IPC.
-3. **`app.manage(engine)`** — engine registered as Tauri managed state.
-4. **`std::thread::spawn`** in `.setup()` — proxy thread lifetime bound to Tauri process.
-
-### What's Already Decoupled
-- **ContextEngine**: Zero `use tauri` imports in entire `engine/` directory. Works standalone with `new(None)`.
-- **`start_proxy()`**: Takes `Option<DynDispatcher>` and `Option<Arc<ContextEngine>>`. Tested without either.
-- **`/_aperture/` HTTP API**: Already exposes full engine (preview, read, search, plan, status, health). Tauri frontend could use this instead of IPC.
-- **Existing binary pattern**: `aperture-mcp` binary links `aperture_lib`, demonstrates standalone use.
-
-### Implementation Plan
-1. **New `src/bin/aperture_proxy.rs`** (~50 lines):
-   - Init logging, create `ContextEngine::new(None)` (or with SSE dispatcher)
-   - Call `proxy::start_proxy(port, dispatcher, None, Some(engine))`
-   - Add `/_aperture/events` SSE endpoint for real-time event push
-2. **Tauri app changes**:
-   - Remove `std::thread::spawn` proxy thread from `.setup()`
-   - Launch `aperture-proxy` as child process (or Tauri sidecar)
-   - Replace 29 `#[tauri::command]` IPC calls with `fetch("http://localhost:5400/_aperture/...")`
-   - Subscribe to `/_aperture/events` SSE stream for real-time updates
-3. **DynDispatcher replacement**:
-   - Standalone proxy: events pushed to SSE subscribers
-   - Tauri frontend: EventSource listener on `/_aperture/events`
-   - No more `app_handle.emit()` — events flow over HTTP
-
-### Migration Strategy
-- Phase 1: Quick fix (ExitRequested handler) — immediate crash protection
-- Phase 2: Add `/_aperture/events` SSE endpoint to existing proxy — no breaking changes
-- Phase 3: New `aperture-proxy` binary, migrate Tauri IPC to HTTP, remove proxy thread
-- Each phase is independently shippable and testable
+## Backlog (Post-Refactor)
+- Block ID display aliases (B1/B42 style mapped to UUIDs)
+- Fix breadcrumb delta bug (shows +0 on re-archival, low severity)
+- Fix budget % gap (overhead not included in engine calc)
+- Fix D: Cache + Archival Death Spiral (cache-aware archival strategy)
+- P1: Economics Ledger (token cost instrumentation)
+- P3: Schema Overhead Reduction (consolidate tools, lazy injection)

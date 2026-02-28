@@ -850,6 +850,39 @@ async function clearEngineContext(): Promise<MutationOutcome> {
 function setEngineBlocks(newBlocks: Block[]): void {
   if (activeSnapshotId !== null) return; // Don't overwrite snapshot view
 
+  // ── DIAG: Block stability diagnostic ──────────────────────────────
+  {
+    const oldIds = new Set(blocks.map(b => b.id));
+    const newIds = new Set(newBlocks.map(b => b.id));
+    const kept = [...oldIds].filter(id => newIds.has(id)).length;
+    const removed = oldIds.size - kept;
+    const added = newIds.size - oldIds.size + removed;
+
+    if (oldIds.size > 0 && newIds.size === 0) {
+      console.warn(
+        `[DIAG:blocks] ALL BLOCKS CLEARED: had ${oldIds.size} blocks, received 0. ` +
+        `This will cause a full visual flash.`
+      );
+      console.trace("[DIAG:blocks] empty setEngineBlocks caller");
+    } else if (oldIds.size > 0 && kept === 0 && newIds.size > 0) {
+      console.warn(
+        `[DIAG:blocks] FULL ID REPLACEMENT: ${oldIds.size} old → ${newIds.size} new, 0 IDs survived. ` +
+        `All blocks will exit+re-enter with transitions.`
+      );
+      // Log a sample of changed IDs for debugging
+      const oldSample = [...oldIds].slice(0, 3).map(id => id.slice(0, 8));
+      const newSample = [...newIds].slice(0, 3).map(id => id.slice(0, 8));
+      console.warn(`[DIAG:blocks]   old sample: ${oldSample.join(", ")}  new sample: ${newSample.join(", ")}`);
+    } else if (oldIds.size > 0 && removed > oldIds.size * 0.5) {
+      console.warn(
+        `[DIAG:blocks] MAJOR CHURN: ${oldIds.size} old → ${newIds.size} new, ` +
+        `kept=${kept} removed=${removed} added=${added}. ` +
+        `>${Math.round((removed / oldIds.size) * 100)}% of blocks will transition.`
+      );
+    }
+  }
+  // ── END DIAG ──────────────────────────────────────────────────────
+
   // Detect mutations (archival/compression) between old and new blocks
   notifyBlockMutations(blocks, newBlocks);
 

@@ -595,7 +595,18 @@ impl ContextPlanner {
                 })
                 .collect();
 
+            // Collect system block IDs so we never re-archive the system prompt.
+            let system_block_ids: HashSet<&str> = input
+                .blocks
+                .iter()
+                .filter(|b| b.role == crate::engine::types::Role::System)
+                .map(|b| b.id.as_str())
+                .collect();
+
             for block_id in &persistent_archived {
+                if system_block_ids.contains(block_id.as_str()) {
+                    continue;
+                }
                 if active_ids.contains(block_id.as_str()) && !already_archived.contains(block_id) {
                     mutations.push(ContextMutation::Archive {
                         block_id: block_id.clone(),

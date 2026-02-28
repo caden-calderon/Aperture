@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use aperture_lib::build_info;
 use aperture_lib::engine::ContextEngine;
 use aperture_lib::events::broadcaster::BroadcastDispatcher;
 use aperture_lib::proxy;
@@ -12,13 +13,20 @@ use aperture_lib::util;
 
 #[tokio::main]
 async fn main() {
+    // --version flag: print fingerprint and exit (before any init).
+    if std::env::args().any(|a| a == "--version" || a == "-V") {
+        println!("{}", build_info::fingerprint());
+        return;
+    }
+
     util::install_crash_diagnostics();
     util::load_env();
     util::init_logging();
 
     let port = util::get_proxy_port();
 
-    tracing::info!("Starting standalone Aperture proxy on port {port}");
+    tracing::info!("{}", build_info::fingerprint());
+    tracing::info!("Starting standalone proxy on port {port}");
 
     // Create broadcast dispatcher for SSE event delivery
     let broadcaster = Arc::new(BroadcastDispatcher::new());

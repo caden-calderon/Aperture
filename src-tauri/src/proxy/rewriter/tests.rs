@@ -164,7 +164,7 @@ fn test_anthropic_replace_system() {
 }
 
 #[test]
-fn test_anthropic_remove_system() {
+fn test_anthropic_remove_system_is_refused() {
     let mut json = json!({
         "model": "claude-sonnet-4-5-20250929",
         "system": "System prompt",
@@ -176,7 +176,9 @@ fn test_anthropic_remove_system() {
     let turns = HashSet::from([0u32]);
     remove_anthropic_messages(&mut json, &turns);
 
-    assert!(json.get("system").is_none());
+    // System prompt must NEVER be removed — it would break the API request.
+    assert!(json.get("system").is_some());
+    assert_eq!(json["system"], "System prompt");
     assert_eq!(json["messages"].as_array().unwrap().len(), 1);
 }
 
@@ -243,7 +245,7 @@ fn test_responses_remove_item() {
 }
 
 #[test]
-fn test_responses_remove_instructions() {
+fn test_responses_remove_instructions_is_refused() {
     let mut json = json!({
         "model": "gpt-4",
         "instructions": "Be helpful",
@@ -255,7 +257,9 @@ fn test_responses_remove_instructions() {
     let turns = HashSet::from([0u32]);
     remove_openai_responses_items(&mut json, &turns);
 
-    assert!(json.get("instructions").is_none());
+    // Instructions must NEVER be removed — it would break the API request.
+    assert!(json.get("instructions").is_some());
+    assert_eq!(json["instructions"], "Be helpful");
     assert_eq!(json["input"].as_array().unwrap().len(), 1);
 }
 

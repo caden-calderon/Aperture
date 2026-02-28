@@ -1,6 +1,6 @@
 [package]
 name = "aperture"
-version = "0.1.0"
+version = "0.10.0"
 description = "Universal LLM context visualization, management, and control proxy"
 authors = ["Caden"]
 edition = "2021"

@@ -861,8 +861,10 @@ fn test_thread_identity_uses_explicit_thread_id_when_present() {
     assert_eq!(result.thread_identity.as_deref(), Some("thread-abc-123"));
 }
 
+/// With fallback hashing disabled, requests without explicit thread IDs
+/// should produce None thread_identity (regardless of message content).
 #[test]
-fn test_thread_identity_falls_back_to_stable_prefix_fingerprint() {
+fn test_thread_identity_none_without_explicit_ids() {
     let body = serde_json::json!({
         "model": "claude-sonnet-4-5",
         "system": "You are helpful.",
@@ -872,18 +874,17 @@ fn test_thread_identity_falls_back_to_stable_prefix_fingerprint() {
         ]
     });
 
-    let parsed_one = parse_anthropic_request(&serde_json::to_vec(&body).unwrap()).unwrap();
-    let parsed_two = parse_anthropic_request(&serde_json::to_vec(&body).unwrap()).unwrap();
-
-    let first = parsed_one.thread_identity.expect("fallback identity");
-    let second = parsed_two.thread_identity.expect("fallback identity");
-    assert!(first.starts_with("fallback:"));
-    assert_eq!(first, second);
+    let parsed = parse_anthropic_request(&serde_json::to_vec(&body).unwrap()).unwrap();
+    assert!(
+        parsed.thread_identity.is_none(),
+        "Without explicit thread IDs, thread_identity must be None"
+    );
 }
 
+/// Billing header churn no longer matters — no fallback hashing at all.
 #[test]
-fn test_thread_identity_fallback_ignores_billing_header_churn() {
-    let body_one = serde_json::json!({
+fn test_thread_identity_none_regardless_of_system_content() {
+    let body = serde_json::json!({
         "model": "claude-sonnet-4-6",
         "system": "x-anthropic-billing-header: cc_version=2.1.47.b96; cch=abc123;\nYou are helpful.",
         "messages": [
@@ -891,31 +892,18 @@ fn test_thread_identity_fallback_ignores_billing_header_churn() {
             {"role": "assistant", "content": "Hey! What are we building today?"}
         ]
     });
-    let body_two = serde_json::json!({
-        "model": "claude-sonnet-4-6",
-        "system": "x-anthropic-billing-header: cc_version=2.1.47.b96; cch=zzz999;\nYou are helpful.",
-        "messages": [
-            {"role": "user", "content": "Howdy claude"},
-            {"role": "assistant", "content": "Hey! What are we building today?"}
-        ]
-    });
 
-    let first = parse_anthropic_request(&serde_json::to_vec(&body_one).unwrap())
-        .unwrap()
-        .thread_identity
-        .expect("fallback identity");
-    let second = parse_anthropic_request(&serde_json::to_vec(&body_two).unwrap())
-        .unwrap()
-        .thread_identity
-        .expect("fallback identity");
-
-    assert!(first.starts_with("fallback:"));
-    assert_eq!(first, second);
+    let parsed = parse_anthropic_request(&serde_json::to_vec(&body).unwrap()).unwrap();
+    assert!(
+        parsed.thread_identity.is_none(),
+        "Without explicit thread IDs, thread_identity must be None"
+    );
 }
 
+/// System-reminder blocks no longer affect identity — fallback disabled.
 #[test]
-fn test_thread_identity_fallback_skips_transient_system_reminder_user_blocks() {
-    let body_one = serde_json::json!({
+fn test_thread_identity_none_with_transient_blocks() {
+    let body = serde_json::json!({
         "model": "claude-sonnet-4-6",
         "messages": [
             {"role": "user", "content": "<system-reminder>\nTransient metadata A"},
@@ -923,26 +911,12 @@ fn test_thread_identity_fallback_skips_transient_system_reminder_user_blocks() {
             {"role": "assistant", "content": "Hey! What are we building today?"}
         ]
     });
-    let body_two = serde_json::json!({
-        "model": "claude-sonnet-4-6",
-        "messages": [
-            {"role": "user", "content": "<system-reminder>\nTransient metadata B"},
-            {"role": "user", "content": "Howdy claude"},
-            {"role": "assistant", "content": "Hey! What are we building today?"}
-        ]
-    });
 
-    let first = parse_anthropic_request(&serde_json::to_vec(&body_one).unwrap())
-        .unwrap()
-        .thread_identity
-        .expect("fallback identity");
-    let second = parse_anthropic_request(&serde_json::to_vec(&body_two).unwrap())
-        .unwrap()
-        .thread_identity
-        .expect("fallback identity");
-
-    assert!(first.starts_with("fallback:"));
-    assert_eq!(first, second);
+    let parsed = parse_anthropic_request(&serde_json::to_vec(&body).unwrap()).unwrap();
+    assert!(
+        parsed.thread_identity.is_none(),
+        "Without explicit thread IDs, thread_identity must be None"
+    );
 }
 
 // --- Content-fingerprint block ID stability ---
@@ -1356,115 +1330,59 @@ fn test_system_fingerprint_differs_for_real_content_changes() {
     assert_ne!(sys_a.id, sys_b.id, "System blocks with different instructions should have different IDs");
 }
 
-#[test]
-// --- H9 Hypothesis: Thread identity divergence after archival ---
-
-/// H9: After the rewriter removes early turns (archival), the POST-REWRITE body
-/// produces a different `thread_identity` than the PRE-REWRITE body. This is
-/// because `fallback_thread_identity()` hashes the first non-transient user
-/// message and first assistant message — if those get removed, the hash changes.
+/// H9 FIX: Without explicit thread IDs, thread_identity is None.
+/// Fallback content-hashing was disabled because it produced different hashes
+/// on every request (Claude Code injects varying <system-reminder> content),
+/// causing catastrophic session fragmentation (20+ sessions for one conversation).
 ///
-/// In the real proxy flow:
-///   1. Rewriter resolves session from PRE-REWRITE body → session A
-///   2. Rewriter removes turns (archival) → POST-REWRITE body
-///   3. Capture parses POST-REWRITE body → gets different thread_identity
-///   4. Ingest calls ensure_session with POST-REWRITE identity → session B
-///   5. session A != session B → plans stored under wrong session
+/// With the fix, sessions key on (provider, model, source, "default") — one
+/// session per provider/model combo, which is correct for single-instance usage.
 #[test]
-fn test_h9_thread_identity_diverges_after_early_turn_removal() {
-    // Original conversation: system + 10 messages (5 user/assistant pairs)
-    let body_original = serde_json::json!({
+fn test_h9_fix_no_fallback_identity_without_explicit_thread() {
+    let body = serde_json::json!({
         "model": "claude-sonnet-4-6",
         "system": "You are Claude Code, Anthropic's official CLI.",
         "messages": [
             {"role": "user", "content": "Help me build a web server in Rust"},
             {"role": "assistant", "content": "I'd be happy to help you build a web server in Rust."},
             {"role": "user", "content": "Use axum for the framework please"},
-            {"role": "assistant", "content": "Sure, let me set up axum with tokio."},
-            {"role": "user", "content": "Now add JWT authentication"},
-            {"role": "assistant", "content": "Adding JWT authentication middleware."},
-            {"role": "user", "content": "Add rate limiting to the endpoints"},
-            {"role": "assistant", "content": "Adding rate limiting with governor crate."},
-            {"role": "user", "content": "Write integration tests"},
-            {"role": "assistant", "content": "Writing integration tests with reqwest."}
+            {"role": "assistant", "content": "Sure, let me set up axum with tokio."}
         ]
     });
 
-    // Post-rewrite: first 2 user/assistant pairs removed by archival.
-    // This simulates what the rewriter does with `remove_turns`.
-    let body_post_rewrite = serde_json::json!({
-        "model": "claude-sonnet-4-6",
-        "system": "You are Claude Code, Anthropic's official CLI.",
-        "messages": [
-            {"role": "user", "content": "Now add JWT authentication"},
-            {"role": "assistant", "content": "Adding JWT authentication middleware."},
-            {"role": "user", "content": "Add rate limiting to the endpoints"},
-            {"role": "assistant", "content": "Adding rate limiting with governor crate."},
-            {"role": "user", "content": "Write integration tests"},
-            {"role": "assistant", "content": "Writing integration tests with reqwest."}
-        ]
-    });
+    let parsed = parse_anthropic_request(&serde_json::to_vec(&body).unwrap()).unwrap();
 
-    let pre = parse_anthropic_request(&serde_json::to_vec(&body_original).unwrap()).unwrap();
-    let post = parse_anthropic_request(&serde_json::to_vec(&body_post_rewrite).unwrap()).unwrap();
-
-    let pre_identity = pre.thread_identity.expect("should have fallback identity");
-    let post_identity = post.thread_identity.expect("should have fallback identity");
-
-    // H9: These MUST differ because fallback_thread_identity hashes the first
-    // user+assistant content, which changes when early turns are removed.
-    assert_ne!(
-        pre_identity, post_identity,
-        "H9 CONFIRMED: thread_identity diverges after removing early turns.\n  \
-         Pre-rewrite identity:  {pre_identity}\n  \
-         Post-rewrite identity: {post_identity}"
+    // No explicit thread_id/session_id/conversation_id in the request →
+    // thread_identity should be None (falls through to "default" in session_identity_key).
+    assert!(
+        parsed.thread_identity.is_none(),
+        "Without explicit thread IDs, thread_identity must be None to prevent fragmentation.\n  \
+         Got: {:?}",
+        parsed.thread_identity
     );
 }
 
-/// Verify the identity is stable when only MIDDLE turns are removed (not the
-/// first user/assistant pair). This establishes that the divergence is
-/// specifically caused by removing the anchor messages used for fallback hashing.
+/// Codex sends `previous_response_id` which IS an explicit thread identifier.
+/// Verify it's still detected correctly after disabling fallback hashing.
 #[test]
-fn test_thread_identity_stable_when_middle_turns_removed() {
-    let body_original = serde_json::json!({
-        "model": "claude-sonnet-4-6",
-        "system": "You are Claude Code, Anthropic's official CLI.",
-        "messages": [
-            {"role": "user", "content": "Help me build a web server in Rust"},
-            {"role": "assistant", "content": "I'd be happy to help you build a web server in Rust."},
-            {"role": "user", "content": "Use axum for the framework please"},
-            {"role": "assistant", "content": "Sure, let me set up axum with tokio."},
-            {"role": "user", "content": "Now add JWT authentication"},
-            {"role": "assistant", "content": "Adding JWT authentication middleware."},
-            {"role": "user", "content": "Write integration tests"},
-            {"role": "assistant", "content": "Writing integration tests with reqwest."}
+fn test_explicit_thread_identity_still_works() {
+    let body = serde_json::json!({
+        "model": "gpt-4.1",
+        "previous_response_id": "resp_abc123def456",
+        "input": [
+            {"role": "user", "content": "Hello"}
         ]
     });
 
-    // Remove MIDDLE turns (axum + JWT) but keep the first pair intact.
-    let body_trimmed = serde_json::json!({
-        "model": "claude-sonnet-4-6",
-        "system": "You are Claude Code, Anthropic's official CLI.",
-        "messages": [
-            {"role": "user", "content": "Help me build a web server in Rust"},
-            {"role": "assistant", "content": "I'd be happy to help you build a web server in Rust."},
-            {"role": "user", "content": "Write integration tests"},
-            {"role": "assistant", "content": "Writing integration tests with reqwest."}
-        ]
-    });
+    let parsed = parse_openai_responses_request(
+        &serde_json::to_vec(&body).unwrap(),
+    )
+    .unwrap();
 
-    let pre = parse_anthropic_request(&serde_json::to_vec(&body_original).unwrap()).unwrap();
-    let post = parse_anthropic_request(&serde_json::to_vec(&body_trimmed).unwrap()).unwrap();
-
-    let pre_identity = pre.thread_identity.expect("should have fallback identity");
-    let post_identity = post.thread_identity.expect("should have fallback identity");
-
-    // When the first user/assistant pair is preserved, identity should be stable.
     assert_eq!(
-        pre_identity, post_identity,
-        "Identity should be stable when first user/assistant anchors are preserved.\n  \
-         Pre:  {pre_identity}\n  \
-         Post: {post_identity}"
+        parsed.thread_identity.as_deref(),
+        Some("resp_abc123def456"),
+        "Explicit thread IDs (like Codex's previous_response_id) must still be detected"
     );
 }
 

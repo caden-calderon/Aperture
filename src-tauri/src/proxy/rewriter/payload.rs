@@ -43,7 +43,7 @@ pub(super) fn remove_anthropic_messages(json: &mut Value, turns_to_remove: &Hash
     }
 
     if turns_to_remove.contains(&0) {
-        json.as_object_mut().map(|obj| obj.remove("system"));
+        warn!("Refusing to remove system prompt (turn 0) from Anthropic request — this would break the API request");
     }
 
     if let Some(messages) = json.get_mut("messages").and_then(|v| v.as_array_mut()) {
@@ -122,7 +122,7 @@ pub(super) fn remove_openai_responses_items(json: &mut Value, turns_to_remove: &
     }
 
     if turns_to_remove.contains(&0) {
-        json.as_object_mut().map(|obj| obj.remove("instructions"));
+        warn!("Refusing to remove instructions (turn 0) from OpenAI Responses request — this would break the API request");
     }
 
     if let Some(input) = json.get_mut("input").and_then(|v| v.as_array_mut()) {

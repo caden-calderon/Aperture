@@ -76,13 +76,16 @@ fn test_ingest_replaces_blocks_not_accumulates() {
     // Critical: store should have exactly 5 blocks (replaced, not 3+5=8)
     assert_eq!(engine.store.count(), 5);
 
-    // Old blocks should be gone
-    assert!(engine.store.get("r1a").is_none());
-    assert!(engine.store.get("r1b").is_none());
-    assert!(engine.store.get("a1").is_none());
+    // Blocks with matching content reuse old IDs (stabilize_block_ids):
+    // - r2a (System, "You are a helpful assistant") → reuses r1a's ID
+    // - r2b (User, "Hello") → reuses r1b's ID
+    // - r2c (Assistant, "Hi there!") → reuses a1's ID
+    assert!(engine.store.get("r1a").is_some());
+    assert!(engine.store.get("r1b").is_some());
+    assert!(engine.store.get("a1").is_some());
 
-    // New blocks should be present
-    assert!(engine.store.get("r2a").is_some());
+    // New content blocks keep their original IDs
+    assert!(engine.store.get("r2d").is_some());
     assert!(engine.store.get("a2").is_some());
 }
 
@@ -165,6 +168,51 @@ fn test_regressive_semantic_collapse_requires_severe_shrink() {
         make_block("u3b", Role::User, "three"),
     ];
 
+    assert!(!is_regressive_semantic_collapse(&old_blocks, &new_blocks));
+}
+
+/// Extreme collapse: 5+ blocks down to 1-2 is always regressive, even with
+/// novel content. This catches MCP tool-call bursts where the context-tool
+/// filter strips most blocks from the capture.
+#[test]
+fn test_semantic_collapse_extreme_drop_always_regressive() {
+    let old_blocks = vec![
+        make_block("s1", Role::System, "system prompt"),
+        make_block("u1", Role::User, "hello"),
+        make_block("a1", Role::Assistant, "hi there"),
+        make_block("u2", Role::User, "do something"),
+        make_block("a2", Role::Assistant, "done"),
+        make_block("u3", Role::User, "follow up"),
+    ];
+
+    // 1 block with entirely novel content (not matching any old block).
+    let new_blocks = vec![make_block("x1", Role::User, "completely different content")];
+
+    // Without the extreme-collapse guard, this would return false because
+    // the novel content is a non-ephemeral addition. With it, 6→1 is always regressive.
+    assert!(is_regressive_semantic_collapse(&old_blocks, &new_blocks));
+}
+
+/// Normal growth should NOT be flagged: going from 5 to 3 is a moderate drop
+/// (not extreme), and the existing 2x guard handles it correctly.
+#[test]
+fn test_semantic_collapse_moderate_drop_not_extreme() {
+    let old_blocks = vec![
+        make_block("s1", Role::System, "system"),
+        make_block("u1", Role::User, "one"),
+        make_block("a1", Role::Assistant, "two"),
+        make_block("u2", Role::User, "three"),
+        make_block("a2", Role::Assistant, "four"),
+    ];
+
+    let new_blocks = vec![
+        make_block("s1", Role::System, "system"),
+        make_block("u2", Role::User, "three"),
+        make_block("a3", Role::Assistant, "new response"),
+    ];
+
+    // 5→3 is NOT extreme (new=3 > 2), so the extreme guard doesn't fire.
+    // The 2x guard: 3*2=6 > 5 → returns false (not a severe drop). Correct.
     assert!(!is_regressive_semantic_collapse(&old_blocks, &new_blocks));
 }
 

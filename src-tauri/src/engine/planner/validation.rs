@@ -48,8 +48,15 @@ impl ContextPlanner {
                 errors.push(format!("Block {nid} not found for archive"));
                 continue;
             }
-            // Reject archival of thinking blocks — Anthropic requires byte-identical preservation
             if let Some(block) = blocks.iter().find(|b| b.id == nid) {
+                // Reject archival of system prompt — removing it destroys the API request
+                if block.role == crate::engine::types::Role::System {
+                    errors.push(format!(
+                        "Block {nid} is a system prompt and cannot be archived"
+                    ));
+                    continue;
+                }
+                // Reject archival of thinking blocks — Anthropic requires byte-identical preservation
                 if block.role == crate::engine::types::Role::Thinking {
                     errors.push(format!(
                         "Block {nid} is a thinking block and cannot be archived (Anthropic requires byte-identical preservation)"

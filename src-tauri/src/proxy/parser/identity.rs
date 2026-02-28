@@ -16,6 +16,7 @@ fn normalize_identity_value(value: &str) -> Option<String> {
     }
 }
 
+#[allow(dead_code)]
 fn normalize_anchor_content(value: &str, max_chars: usize) -> Option<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -30,6 +31,7 @@ fn normalize_anchor_content(value: &str, max_chars: usize) -> Option<String> {
     }
 }
 
+#[allow(dead_code)]
 fn is_transient_user_anchor(value: &str) -> bool {
     let trimmed = value.trim_start();
     trimmed.starts_with("<system-reminder>")
@@ -40,6 +42,7 @@ fn is_transient_user_anchor(value: &str) -> bool {
         || trimmed.starts_with("<command-args>")
 }
 
+#[allow(dead_code)]
 fn sanitize_system_anchor(value: &str) -> Option<String> {
     let filtered = value
         .lines()
@@ -104,6 +107,7 @@ fn explicit_thread_identity(raw: &serde_json::Value) -> Option<String> {
     None
 }
 
+#[allow(dead_code)]
 fn fallback_thread_identity(blocks: &[Block]) -> Option<String> {
     let mut anchors = Vec::new();
 
@@ -175,6 +179,19 @@ fn fallback_thread_identity(blocks: &[Block]) -> Option<String> {
     (!anchors.is_empty()).then(|| format!("fallback:{}", short_hash(&anchors.join("|"))))
 }
 
-pub(super) fn derive_thread_identity(raw: &serde_json::Value, blocks: &[Block]) -> Option<String> {
-    explicit_thread_identity(raw).or_else(|| fallback_thread_identity(blocks))
+pub(super) fn derive_thread_identity(raw: &serde_json::Value, _blocks: &[Block]) -> Option<String> {
+    // Only use explicit thread IDs from the request (thread_id, session_id,
+    // previous_response_id, etc.). The fallback content-hashing approach is
+    // fundamentally unreliable: Claude Code injects varying <system-reminder>
+    // content into user messages on each turn, shifting which block the
+    // heuristic anchors on and producing a different hash per request. This
+    // caused catastrophic session fragmentation (20+ sessions for one
+    // conversation, each with 1 block).
+    //
+    // Without an explicit thread ID (Claude Code, Aider, etc.), the session
+    // key falls through to "default" in session_identity_key(), giving one
+    // session per (provider, model, source) — which is correct for single-
+    // instance usage. Multi-instance disambiguation can be added later via
+    // an X-Aperture-Thread header if needed.
+    explicit_thread_identity(raw)
 }

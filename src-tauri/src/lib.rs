@@ -9,6 +9,7 @@
 //! Tauri/WebKit crashes. This Tauri app is a pure frontend that connects
 //! to the proxy via HTTP/SSE.
 
+pub mod build_info;
 pub mod engine;
 pub mod events;
 pub mod mcp;
@@ -31,7 +32,7 @@ pub fn run() {
 
     let port = util::get_proxy_port();
 
-    info!("Starting Aperture");
+    info!("{}", build_info::fingerprint());
     info!("Transparent proxy mode — tools' API keys pass through, no Aperture key needed");
 
     let app = tauri::Builder::default()
@@ -112,12 +113,22 @@ fn spawn_proxy_process() -> Result<(), String> {
     {
         use std::os::unix::process::CommandExt;
         use std::process::{Command, Stdio};
+
+        // Direct proxy stderr to a log file so diagnostics survive Tauri exit.
+        // When run manually, proxy still logs to terminal (its own stderr default).
+        let log_path = std::path::Path::new("/tmp/aperture-proxy.log");
+        let log_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_path)
+            .map_err(|e| format!("failed to open proxy log {}: {e}", log_path.display()))?;
+
         // Use setsid via pre_exec to create a new session, ensuring the
         // child process survives when the parent (Tauri) exits.
         let mut cmd = Command::new(&binary);
         cmd.stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::inherit()); // Keep stderr for debugging
+            .stderr(Stdio::from(log_file));
 
         // SAFETY: pre_exec runs between fork and exec. setsid() is
         // async-signal-safe and creates a new process group + session.

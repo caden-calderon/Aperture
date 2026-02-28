@@ -10,6 +10,7 @@
 //! - `POST /_aperture/context/plan`    — Plan context changes
 //! - `POST /_aperture/context/status`  — Full manifest
 //! - `GET  /_aperture/health`          — Health check
+//! - `GET  /_aperture/version`        — Build fingerprint
 
 use axum::{
     body::Body,
@@ -28,6 +29,7 @@ use tokio_stream::StreamExt;
 use tracing::{debug, warn};
 
 use super::ProxyState;
+use crate::build_info;
 use crate::engine::ContextEngine;
 use crate::events::types::ApertureEvent;
 use crate::metacog::{
@@ -59,6 +61,8 @@ pub async fn handle_aperture_route(
 
     let response = if sub_path == "/health" {
         health_check().into_response()
+    } else if sub_path == "/version" {
+        version_info().into_response()
     } else if sub_path == "/events" {
         sse_events(state).into_response()
     } else if let Some(command) = sub_path.strip_prefix("/ipc/").filter(|c| !c.is_empty()) {
@@ -113,8 +117,14 @@ fn health_check() -> impl IntoResponse {
     Json(json!({
         "status": "ok",
         "service": "aperture",
-        "version": env!("CARGO_PKG_VERSION")
+        "version": build_info::PKG_VERSION,
+        "git_hash": build_info::GIT_HASH
     }))
+}
+
+/// Full build fingerprint for diagnosing stale-binary issues.
+fn version_info() -> impl IntoResponse {
+    Json(build_info::version_json())
 }
 
 /// Dispatch a context tool via the engine, returning a JSON response.

@@ -895,6 +895,12 @@ impl ContextEngine {
             self.session_identity_index.remove(&identity_key);
         }
 
+        let total_sessions = self.session_identity_index.len();
+        warn!(
+            identity_key = %identity_key,
+            total_sessions = total_sessions,
+            "Creating NEW session (no existing match)"
+        );
         let session_id = self.create_session(provider, model, source, thread_id);
         self.session_identity_index
             .insert(identity_key, session_id.clone());

@@ -85,11 +85,8 @@ function checkIdle(): void {
     status = hasCapturedTraffic ? "connected" : "disconnected";
     activeModel = null;
     activeProvider = "unknown";
-
-    // Clear blocks when going idle — client likely exited
-    if (onSessionResetCb) {
-      onSessionResetCb();
-    }
+    // Blocks intentionally persist — idle doesn't mean the session ended.
+    // They'll be replaced when a new session starts (context_updated event).
   }
 }
 
